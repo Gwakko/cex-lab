@@ -26,7 +26,7 @@ func testConfigs() []MarketConfig {
 
 func newExchange(t *testing.T) *Exchange {
 	t.Helper()
-	x, err := New(ledger.New(), testConfigs()...)
+	x, err := New(ledger.New(), testConfigs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestRestartRecoversBookAndOrderIDs(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		x, err := New(l, cfgs...)
+		x, err := New(l, cfgs)
 		if err != nil {
 			t.Fatal(err)
 		}

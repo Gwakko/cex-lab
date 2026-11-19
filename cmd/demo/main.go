@@ -25,11 +25,11 @@ const (
 func main() {
 	ctx := context.Background()
 	l := ledger.New()
-	x, err := exchange.New(l, exchange.MarketConfig{
+	x, err := exchange.New(l, []exchange.MarketConfig{{
 		Symbol: "BTC-USDT", Base: btc, Quote: usdt,
 		Tick: 1, Lot: lot, MakerFeeBps: 10, TakerFeeBps: 20,
 		Log: &engine.MemLog{},
-	})
+	}})
 	must(err)
 	defer x.Close()
 

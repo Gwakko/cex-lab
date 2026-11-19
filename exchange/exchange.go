@@ -7,12 +7,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/bits"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/gwakko/cex-lab/engine"
 	"github.com/gwakko/cex-lab/ledger"
+	"github.com/gwakko/cex-lab/telemetry/trace"
 )
 
 var ErrUnknownMarket = errors.New("exchange: unknown market")
@@ -41,21 +44,44 @@ type market struct {
 
 // Exchange is the application service in front of ledger and engines.
 type Exchange struct {
-	ledger  *ledger.Ledger
-	markets map[string]*market
-	symbols []string // sorted; fixed lock order
+	ledger     *ledger.Ledger
+	markets    map[string]*market
+	symbols    []string // sorted; fixed lock order
+	metrics    Metrics
+	log        *slog.Logger
+	engineOpts []engine.Option
+
+	checkMu   sync.Mutex
+	lastCheck error
+}
+
+// Option configures an Exchange.
+type Option func(*Exchange)
+
+// WithMetrics reports order, trade and invariant measurements to m.
+func WithMetrics(m Metrics) Option { return func(x *Exchange) { x.metrics = m } }
+
+// WithLogger logs order lifecycle events.
+func WithLogger(l *slog.Logger) Option { return func(x *Exchange) { x.log = l } }
+
+// WithEngineOptions passes options to every market's engine.
+func WithEngineOptions(opts ...engine.Option) Option {
+	return func(x *Exchange) { x.engineOpts = append(x.engineOpts, opts...) }
 }
 
 // New starts one engine per market, recovering each from its log.
-func New(l *ledger.Ledger, cfgs ...MarketConfig) (*Exchange, error) {
-	x := &Exchange{ledger: l, markets: map[string]*market{}}
+func New(l *ledger.Ledger, cfgs []MarketConfig, opts ...Option) (*Exchange, error) {
+	x := &Exchange{ledger: l, markets: map[string]*market{}, metrics: nopMetrics{}, log: slog.New(slog.DiscardHandler)}
+	for _, o := range opts {
+		o(x)
+	}
 	for _, c := range cfgs {
 		if err := validateConfig(c, x.markets); err != nil {
 			x.Close()
 			return nil, err
 		}
 		spec := engine.MarketSpec{Symbol: c.Symbol, Tick: c.Tick, Lot: c.Lot}
-		eng, err := engine.Start(spec, c.Log)
+		eng, err := engine.Start(spec, c.Log, x.engineOpts...)
 		if err != nil {
 			x.Close()
 			return nil, err
@@ -120,12 +146,34 @@ type PlaceResult struct {
 	Resting   bool
 }
 
-// Place reserves funds, matches the order and settles every trade.
-func (x *Exchange) Place(ctx context.Context, req PlaceRequest) (PlaceResult, error) {
+// Place reserves funds, matches the order and settles every trade. The trace
+// id in ctx (created if absent) follows the order into the engine command,
+// the ledger transactions and their outbox events.
+func (x *Exchange) Place(ctx context.Context, req PlaceRequest) (res PlaceResult, err error) {
+	start := time.Now()
+	ctx, traceID := trace.Ensure(ctx)
+	log := x.log.With("trace_id", traceID, "market", req.Market, "user_id", req.User)
 	m, err := x.market(req.Market)
 	if err != nil {
+		x.metrics.OrderRejected("unknown", rejectReason(err))
+		log.Info("order rejected", "error", err)
 		return PlaceResult{}, err
 	}
+	defer func() {
+		x.metrics.PlaceDuration(m.cfg.Symbol, time.Since(start))
+		if err != nil {
+			x.metrics.OrderRejected(m.cfg.Symbol, rejectReason(err))
+			log.Info("order rejected", "reason", rejectReason(err), "error", err, "duration_ms", msSince(start))
+			return
+		}
+		x.metrics.OrderPlaced(m.cfg.Symbol, req.Side.String(), req.Type.String())
+		log.Info("order placed", "order_id", res.OrderID, "side", req.Side.String(), "type", req.Type.String(),
+			"price", req.Price, "qty", req.Qty, "trades", len(res.Trades), "resting", res.Resting, "duration_ms", msSince(start))
+	}()
+	return x.place(ctx, m, req, start)
+}
+
+func (x *Exchange) place(ctx context.Context, m *market, req PlaceRequest, start time.Time) (PlaceResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -142,7 +190,7 @@ func (x *Exchange) Place(ctx context.Context, req PlaceRequest) (PlaceResult, er
 		return PlaceResult{}, err
 	}
 	asset, reserve := m.initialReserve(o)
-	_, replayed, err := x.ledger.Apply(ledger.Hold{Key: "hold:" + o.ID, User: o.User, Asset: asset, Amount: reserve})
+	_, replayed, err := x.ledger.ApplyContext(ctx, ledger.Hold{Key: "hold:" + o.ID, User: o.User, Asset: asset, Amount: reserve})
 	if err != nil {
 		return PlaceResult{}, fmt.Errorf("exchange: reserve for %s: %w", o.ID, err)
 	}
@@ -151,23 +199,26 @@ func (x *Exchange) Place(ctx context.Context, req PlaceRequest) (PlaceResult, er
 		return PlaceResult{}, fmt.Errorf("exchange: order id %s was already used", o.ID)
 	}
 
-	res, err := m.eng.Submit(ctx, engine.Command{Type: engine.Place, Order: o})
+	res, err := m.eng.Submit(ctx, engine.Command{Type: engine.Place, Order: o, TraceID: trace.ID(ctx)})
 	if err == nil {
 		err = res.Err
 	}
 	if err != nil {
-		return PlaceResult{}, errors.Join(err, x.release(o.ID+":rejected", o.User, asset, reserve))
+		return PlaceResult{}, errors.Join(err, x.release(ctx, o.ID+":rejected", o.User, asset, reserve))
+	}
+	if len(res.Trades) > 0 {
+		x.metrics.OrderToTrade(m.cfg.Symbol, time.Since(start))
 	}
 
 	for i, t := range res.Trades {
-		used, err := x.settle(m, o, t, i)
+		used, err := x.settle(ctx, m, o, t, i)
 		if err != nil {
 			return PlaceResult{}, fmt.Errorf("exchange: settle %s trade %d (ledger and book diverged): %w", o.ID, i, err)
 		}
 		reserve -= used
 	}
 	if !res.Resting {
-		if err := x.release(o.ID+":unfilled", o.User, asset, reserve); err != nil {
+		if err := x.release(ctx, o.ID+":unfilled", o.User, asset, reserve); err != nil {
 			return PlaceResult{}, err
 		}
 	}
@@ -176,6 +227,8 @@ func (x *Exchange) Place(ctx context.Context, req PlaceRequest) (PlaceResult, er
 
 // Cancel removes a resting order and releases what it still reserves.
 func (x *Exchange) Cancel(ctx context.Context, symbol, user, orderID string) (engine.Order, error) {
+	ctx, traceID := trace.Ensure(ctx)
+	log := x.log.With("trace_id", traceID, "market", symbol, "user_id", user, "order_id", orderID)
 	m, err := x.market(symbol)
 	if err != nil {
 		return engine.Order{}, err
@@ -183,15 +236,21 @@ func (x *Exchange) Cancel(ctx context.Context, symbol, user, orderID string) (en
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	res, err := m.eng.Submit(ctx, engine.Command{Type: engine.Cancel, Order: engine.Order{ID: orderID, User: user}})
+	res, err := m.eng.Submit(ctx, engine.Command{Type: engine.Cancel, Order: engine.Order{ID: orderID, User: user}, TraceID: traceID})
 	if err == nil {
 		err = res.Err
 	}
 	if err != nil {
+		log.Info("cancel rejected", "error", err)
 		return engine.Order{}, err
 	}
 	asset, amount := m.restingReserve(res.Order)
-	return res.Order, x.release(orderID+":cancel", user, asset, amount)
+	if err := x.release(ctx, orderID+":cancel", user, asset, amount); err != nil {
+		return engine.Order{}, err
+	}
+	x.metrics.OrderCancelled(m.cfg.Symbol)
+	log.Info("order cancelled", "remaining", res.Order.Remaining)
+	return res.Order, nil
 }
 
 // initialReserve is what an order locks before matching.
@@ -219,7 +278,7 @@ func (m *market) restingReserve(o engine.Order) (ledger.Asset, int64) {
 // settle books one trade and returns how much of the taker's reserve it used.
 // A limit buyer reserved at its own price; filling at a better maker price
 // refunds the difference in the same ledger transaction.
-func (x *Exchange) settle(m *market, taker engine.Order, t engine.Trade, i int) (int64, error) {
+func (x *Exchange) settle(ctx context.Context, m *market, taker engine.Order, t engine.Trade, i int) (int64, error) {
 	notional, _ := m.spec.Notional(t.Price, t.Qty)
 	s := ledger.Settle{
 		Key:      fmt.Sprintf("settle:%s:%d:%d", m.cfg.Symbol, t.Seq, i),
@@ -244,15 +303,18 @@ func (x *Exchange) settle(m *market, taker engine.Order, t engine.Trade, i int) 
 	}
 	s.BuyerFee = fee(s.BaseQty, buyerBps)
 	s.SellerFee = fee(s.QuoteQty, sellerBps)
-	_, _, err := x.ledger.Apply(s)
-	return used, err
+	if _, _, err := x.ledger.ApplyContext(ctx, s); err != nil {
+		return 0, err
+	}
+	x.metrics.Trade(m.cfg.Symbol, string(m.cfg.Base), string(m.cfg.Quote), s.BaseQty, s.QuoteQty)
+	return used, nil
 }
 
-func (x *Exchange) release(key, user string, asset ledger.Asset, amount int64) error {
+func (x *Exchange) release(ctx context.Context, key, user string, asset ledger.Asset, amount int64) error {
 	if amount == 0 {
 		return nil
 	}
-	_, _, err := x.ledger.Apply(ledger.Release{Key: "release:" + key, User: user, Asset: asset, Amount: amount})
+	_, _, err := x.ledger.ApplyContext(ctx, ledger.Release{Key: "release:" + key, User: user, Asset: asset, Amount: amount})
 	return err
 }
 
@@ -262,3 +324,20 @@ func fee(amount, bps int64) int64 {
 	q, _ := bits.Div64(hi, lo, 10_000)
 	return int64(q)
 }
+
+// rejectReason maps an error to a bounded label value.
+func rejectReason(err error) string {
+	switch {
+	case errors.Is(err, ledger.ErrInsufficientFunds):
+		return "insufficient_funds"
+	case errors.Is(err, engine.ErrInvalidOrder):
+		return "invalid_order"
+	case errors.Is(err, ErrUnknownMarket):
+		return "unknown_market"
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	}
+	return "internal"
+}
+
+func msSince(t time.Time) float64 { return float64(time.Since(t).Microseconds()) / 1000 }

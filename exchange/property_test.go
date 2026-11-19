@@ -65,7 +65,7 @@ func newSim(t testing.TB) *sim {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.x, err = New(l, s.cfgs...); err != nil {
+	if s.x, err = New(l, s.cfgs); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(s.x.Close)
