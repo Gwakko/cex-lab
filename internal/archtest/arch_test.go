@@ -26,6 +26,12 @@ var modules = []string{"ledger", "trading", "custody", "marketdata"}
 // networking belong in adapters or the composition root.
 var forbiddenInDomain = []string{"os", "os/exec", "net", "net/http"}
 
+// restrictedLibs are third-party libraries only one package may import, so a
+// dependency stays an adapter detail.
+var restrictedLibs = map[string]string{
+	"github.com/coder/websocket": module + "/internal/marketdata/adapters/ws",
+}
+
 // apiFiles may declare exported top-level identifiers in a module root.
 var apiFiles = []string{"api.go", "ports.go"}
 
@@ -88,12 +94,25 @@ func importViolations(pkgs []pkg) []string {
 	for _, p := range pkgs {
 		from := classify(p.ImportPath)
 		for _, imp := range p.Imports {
-			if msg := rule(from, imp); msg != "" {
+			msg := libRule(p.ImportPath, imp)
+			if msg == "" {
+				msg = rule(from, imp)
+			}
+			if msg != "" {
 				out = append(out, fmt.Sprintf("%s imports %s: %s", short(p.ImportPath), short(imp), msg))
 			}
 		}
 	}
 	return out
+}
+
+func libRule(path, imp string) string {
+	for lib, owner := range restrictedLibs {
+		if (imp == lib || strings.HasPrefix(imp, lib+"/")) && path != owner {
+			return fmt.Sprintf("only %s may import %s", short(owner), lib)
+		}
+	}
+	return ""
 }
 
 func rule(from class, imp string) string {
@@ -278,6 +297,8 @@ func TestRulesCatchViolations(t *testing.T) {
 		{"marketdata imports trading", p("internal/marketdata/internal/hub", "internal/trading"), "must not import module trading"},
 		{"trading imports marketdata", p("internal/trading/internal/service", "internal/marketdata"), "must not import module marketdata"},
 		{"marketdata domain uses net/http", p("internal/marketdata/internal/hub", "net/http"), "must not do I/O"},
+		{"hub imports websocket", p("internal/marketdata/internal/hub", "github.com/coder/websocket"), "only internal/marketdata/adapters/ws may import"},
+		{"demo imports websocket", p("cmd/demo", "github.com/coder/websocket/wsjson"), "only internal/marketdata/adapters/ws may import"},
 	}
 	for _, tc := range cases {
 		vs := importViolations([]pkg{tc.pkg})
@@ -292,6 +313,7 @@ func TestRulesCatchViolations(t *testing.T) {
 		p("internal/app", "internal/ledger", "internal/trading", "internal/custody/adapters/fakechain"),
 		p("internal/platform/outbox", "internal/events", "log/slog"),
 		p("cmd/demo", "internal/app", "internal/ledger"),
+		p("internal/marketdata/adapters/ws", "github.com/coder/websocket", "internal/marketdata", "net/http"),
 	}
 	if vs := importViolations(allowed); len(vs) != 0 {
 		t.Errorf("allowed imports reported: %q", vs)
