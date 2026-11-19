@@ -36,8 +36,8 @@ func newHarness(t *testing.T, confirmations uint64, store StateStore) *harness {
 }
 
 // credit books a deposit idempotently by (txhash, log index).
-func (h *harness) credit(d Deposit) error {
-	_, _, err := h.ledger.Apply(ledger.Deposit{
+func (h *harness) credit(ctx context.Context, d Deposit) error {
+	_, _, err := h.ledger.ApplyContext(ctx, ledger.Deposit{
 		Key: "chain:" + d.Key(), User: "alice", Asset: ledger.Asset(d.Asset), Amount: d.Amount,
 	})
 	return err
@@ -175,7 +175,7 @@ func TestDuplicateDeliveryCreditsOnce(t *testing.T) {
 	h.want(0, 1, 30)
 
 	// The ledger is the last line of defence: crediting again is a no-op.
-	if err := h.credit(h.w.Credited()[0]); err != nil {
+	if err := h.credit(h.ctx, h.w.Credited()[0]); err != nil {
 		t.Fatal(err)
 	}
 	h.want(0, 1, 30)

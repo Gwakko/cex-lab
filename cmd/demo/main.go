@@ -81,8 +81,8 @@ func main() {
 // chainDeposit credits alice's BTC through the watcher on a fake chain.
 func chainDeposit(ctx context.Context, l *ledger.Ledger) {
 	fc := chain.NewFakeChain()
-	credit := func(d chain.Deposit) error {
-		_, _, err := l.Apply(ledger.Deposit{Key: "chain:" + d.Key(), User: "alice", Asset: ledger.Asset(d.Asset), Amount: d.Amount})
+	credit := func(ctx context.Context, d chain.Deposit) error {
+		_, _, err := l.ApplyContext(ctx, ledger.Deposit{Key: "chain:" + d.Key(), User: "alice", Asset: ledger.Asset(d.Asset), Amount: d.Amount})
 		return err
 	}
 	w, err := chain.NewWatcher(fc, &chain.MemStateStore{}, credit, chain.Config{Confirmations: 3, Watched: []string{"addr-alice"}, StartBlock: 1})
