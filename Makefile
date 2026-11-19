@@ -1,4 +1,4 @@
-.PHONY: check vet test fuzz bench demo demo-serve
+.PHONY: check vet test arch fuzz bench demo demo-serve
 
 check: vet test
 
@@ -8,6 +8,9 @@ vet:
 
 test:
 	go test -race -count=1 ./...
+
+arch:
+	go test -count=1 ./internal/archtest/
 
 fuzz:
 	go test -run '^$$' -fuzz FuzzExchange -fuzztime 30s ./internal/trading/
