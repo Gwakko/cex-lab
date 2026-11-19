@@ -7,8 +7,9 @@ import (
 	"testing"
 
 	"github.com/gwakko/cex-lab/chain"
+	"github.com/gwakko/cex-lab/internal/ledger"
+	"github.com/gwakko/cex-lab/internal/ledger/adapters/memstore"
 	"github.com/gwakko/cex-lab/internal/platform/telemetry"
-	"github.com/gwakko/cex-lab/ledger"
 )
 
 func newWatcher(t *testing.T, reg *telemetry.Registry, fc *chain.FakeChain, l *ledger.Ledger, confirmations uint64) *chain.Watcher {
@@ -33,7 +34,7 @@ func tr(tx string, amount int64) chain.Transfer {
 func TestChainMetricsReorgAndDuplicates(t *testing.T) {
 	reg := telemetry.NewRegistry()
 	fc := chain.NewFakeChain()
-	w := newWatcher(t, reg, fc, ledger.New(), 3)
+	w := newWatcher(t, reg, fc, memstore.NewLedger(), 3)
 	ctx := context.Background()
 
 	fc.Mine(tr("0x1", 10), tr("0x1", 10)) // block 1, duplicated log
@@ -66,7 +67,7 @@ func TestChainMetricsReorgAndDuplicates(t *testing.T) {
 func TestChainMetricsReorgBelowThreshold(t *testing.T) {
 	reg := telemetry.NewRegistry()
 	fc := chain.NewFakeChain()
-	w := newWatcher(t, reg, fc, ledger.New(), 2)
+	w := newWatcher(t, reg, fc, memstore.NewLedger(), 2)
 	ctx := context.Background()
 	fc.Mine(tr("0xbad", 5))
 	fc.Mine()

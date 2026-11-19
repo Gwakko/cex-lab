@@ -6,7 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/gwakko/cex-lab/ledger"
+	"github.com/gwakko/cex-lab/internal/ledger"
+	"github.com/gwakko/cex-lab/internal/ledger/adapters/memstore"
 )
 
 const depositAddr = "0xdeposit-alice"
@@ -27,7 +28,7 @@ func newHarness(t *testing.T, confirmations uint64, store StateStore) *harness {
 		t:      t,
 		ctx:    context.Background(),
 		chain:  NewFakeChain(),
-		ledger: ledger.New(),
+		ledger: memstore.NewLedger(),
 		store:  store,
 		cfg:    Config{Confirmations: confirmations, Watched: []string{depositAddr}, StartBlock: 1, HashWindow: 16},
 	}

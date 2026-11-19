@@ -1,4 +1,4 @@
-package ledger
+package core
 
 import (
 	"context"
@@ -35,13 +35,6 @@ const (
 	ResultError    = "error"
 )
 
-// Metrics receives ledger measurements. Labels are bounded: op and result.
-type Metrics interface {
-	CommandDone(op, result string)
-	IdempotencyConflict()
-	EntriesWritten(n int)
-}
-
 type nopMetrics struct{}
 
 func (nopMetrics) CommandDone(string, string) {}
@@ -69,12 +62,6 @@ type Ledger struct {
 	events      []events.Event
 	metrics     Metrics
 	log         *slog.Logger
-}
-
-// New returns an empty ledger backed by a MemStore.
-func New(opts ...Option) *Ledger {
-	l, _ := Open(&MemStore{}, opts...) // an empty MemStore cannot fail to load
-	return l
 }
 
 // Open rebuilds a ledger by replaying every transaction in store.
@@ -314,6 +301,10 @@ type InvariantError struct {
 	Invariant string
 	Detail    string
 }
+
+// InvariantName lets other modules classify the violation without importing
+// this package.
+func (e *InvariantError) InvariantName() string { return e.Invariant }
 
 func (e *InvariantError) Error() string {
 	return "invariant " + e.Invariant + " violated: " + e.Detail

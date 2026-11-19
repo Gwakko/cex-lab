@@ -4,8 +4,9 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/gwakko/cex-lab/internal/ledger"
+	"github.com/gwakko/cex-lab/internal/ledger/adapters/memstore"
 	"github.com/gwakko/cex-lab/internal/platform/telemetry"
-	"github.com/gwakko/cex-lab/ledger"
 )
 
 // BenchmarkLedgerApply compares the no-op recorder with the real registry.
@@ -18,7 +19,7 @@ func BenchmarkLedgerApply(b *testing.B) {
 		{"instrumented", []ledger.Option{ledger.WithMetrics(NewLedger(telemetry.NewRegistry()))}},
 	} {
 		b.Run(bc.name, func(b *testing.B) {
-			l := ledger.New(bc.opts...)
+			l := memstore.NewLedger(bc.opts...)
 			i := 0
 			for b.Loop() {
 				i++

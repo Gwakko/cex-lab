@@ -7,15 +7,16 @@ import (
 	"time"
 
 	"github.com/gwakko/cex-lab/internal/events"
+	"github.com/gwakko/cex-lab/internal/ledger"
+	"github.com/gwakko/cex-lab/internal/ledger/adapters/memstore"
 	"github.com/gwakko/cex-lab/internal/platform/telemetry"
-	"github.com/gwakko/cex-lab/ledger"
 	"github.com/gwakko/cex-lab/outbox"
 )
 
 func TestOutboxMetrics(t *testing.T) {
 	reg := telemetry.NewRegistry()
 	m := NewOutbox(reg)
-	l := ledger.New()
+	l := memstore.NewLedger()
 	for i := range 4 {
 		l.Apply(ledger.Deposit{Key: fmt.Sprint(i), User: "a", Asset: "BTC", Amount: 1})
 	}

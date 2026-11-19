@@ -6,12 +6,13 @@ import (
 	"testing"
 
 	"github.com/gwakko/cex-lab/internal/events"
-	"github.com/gwakko/cex-lab/ledger"
+	"github.com/gwakko/cex-lab/internal/ledger"
+	"github.com/gwakko/cex-lab/internal/ledger/adapters/memstore"
 )
 
 func seededLedger(t *testing.T, n int) *ledger.Ledger {
 	t.Helper()
-	l := ledger.New()
+	l := memstore.NewLedger()
 	for i := range n {
 		if _, _, err := l.Apply(ledger.Deposit{Key: fmt.Sprintf("d%d", i), User: "alice", Asset: "BTC", Amount: 1}); err != nil {
 			t.Fatal(err)
@@ -93,7 +94,7 @@ func TestInboxRetriesFailedHandler(t *testing.T) {
 }
 
 func TestEventsSurviveJournalReplay(t *testing.T) {
-	store := &ledger.MemStore{}
+	store := &memstore.Store{}
 	l, _ := ledger.Open(store)
 	l.Apply(ledger.Deposit{Key: "d1", User: "a", Asset: "BTC", Amount: 1})
 	l2, err := ledger.Open(store)

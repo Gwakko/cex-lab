@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/gwakko/cex-lab/ledger"
+	"github.com/gwakko/cex-lab/internal/ledger"
 )
 
 // Check asserts the cross-component invariants while holding every market

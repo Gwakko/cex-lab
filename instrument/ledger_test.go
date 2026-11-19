@@ -11,9 +11,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gwakko/cex-lab/internal/ledger"
+	"github.com/gwakko/cex-lab/internal/ledger/adapters/filestore"
+	"github.com/gwakko/cex-lab/internal/ledger/adapters/memstore"
 	"github.com/gwakko/cex-lab/internal/platform/telemetry"
 	"github.com/gwakko/cex-lab/internal/platform/trace"
-	"github.com/gwakko/cex-lab/ledger"
 )
 
 func metric(t *testing.T, r *telemetry.Registry, name string, labels ...string) float64 {
@@ -49,7 +51,7 @@ func logLines(t *testing.T, buf *bytes.Buffer) []map[string]any {
 func TestLedgerMetricsAndLogs(t *testing.T) {
 	reg := telemetry.NewRegistry()
 	var logs bytes.Buffer
-	l := ledger.New(ledger.WithMetrics(NewLedger(reg)), ledger.WithLogger(slog.New(slog.NewJSONHandler(&logs, nil))))
+	l := memstore.NewLedger(ledger.WithMetrics(NewLedger(reg)), ledger.WithLogger(slog.New(slog.NewJSONHandler(&logs, nil))))
 	ctx := trace.WithID(context.Background(), "trace-abc")
 
 	dep := ledger.Deposit{Key: "dep-1", User: "alice", Asset: "BTC", Amount: 100}
@@ -89,7 +91,7 @@ func TestInvariantErrorNamesTheInvariant(t *testing.T) {
 func TestJournalMetrics(t *testing.T) {
 	reg := telemetry.NewRegistry()
 	path := filepath.Join(t.TempDir(), "ledger.journal")
-	fs, err := ledger.OpenFileStore(path, NewJournal(reg, "ledger"))
+	fs, err := filestore.Open(path, NewJournal(reg, "ledger"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +107,7 @@ func TestJournalMetrics(t *testing.T) {
 	f, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
 	f.WriteString(`{"Seq":3,"Ke`) // torn write
 	f.Close()
-	fs, _ = ledger.OpenFileStore(path, NewJournal(reg, "ledger"))
+	fs, _ = filestore.Open(path, NewJournal(reg, "ledger"))
 	defer fs.Close()
 	if _, err := ledger.Open(fs); err != nil {
 		t.Fatal(err)

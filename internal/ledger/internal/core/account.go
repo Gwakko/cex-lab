@@ -1,8 +1,8 @@
-// Package ledger is a double-entry, append-only ledger with integer amounts.
+// Package core implements the ledger module: a double-entry, append-only ledger with integer amounts.
 //
 // Every command becomes one transaction whose entries sum to zero per asset.
 // Balances are never stored on their own: they are derived from entries.
-package ledger
+package core
 
 // Asset identifies a currency. Amounts are always int64 minimal units
 // (satoshi, cents, ...), never floats.

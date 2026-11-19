@@ -27,9 +27,10 @@ import (
 	"github.com/gwakko/cex-lab/exchange"
 	"github.com/gwakko/cex-lab/instrument"
 	"github.com/gwakko/cex-lab/internal/events"
+	"github.com/gwakko/cex-lab/internal/ledger"
+	"github.com/gwakko/cex-lab/internal/ledger/adapters/filestore"
 	"github.com/gwakko/cex-lab/internal/platform/telemetry"
 	"github.com/gwakko/cex-lab/internal/platform/trace"
-	"github.com/gwakko/cex-lab/ledger"
 	"github.com/gwakko/cex-lab/outbox"
 )
 
@@ -53,7 +54,7 @@ func main() {
 	reg := telemetry.NewRegistry()
 	health := &telemetry.Health{}
 
-	store, err := ledger.OpenFileStore(filepath.Join(dir, "ledger.journal"), instrument.NewJournal(reg, "ledger"))
+	store, err := filestore.Open(filepath.Join(dir, "ledger.journal"), instrument.NewJournal(reg, "ledger"))
 	must(err)
 	defer store.Close()
 	cmdLog, err := engine.OpenFileLog(filepath.Join(dir, "btc-usdt.cmdlog"), instrument.NewJournal(reg, "engine_BTC-USDT"))

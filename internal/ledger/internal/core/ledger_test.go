@@ -1,9 +1,7 @@
-package ledger
+package core
 
 import (
 	"errors"
-	"path/filepath"
-	"reflect"
 	"testing"
 )
 
@@ -36,7 +34,7 @@ func verify(t *testing.T, l *Ledger) {
 }
 
 func TestDepositHoldRelease(t *testing.T) {
-	l := New()
+	l := newMem()
 	mustApply(t, l, Deposit{Key: "d1", User: "alice", Asset: usdt, Amount: 1000})
 	mustApply(t, l, Hold{Key: "h1", User: "alice", Asset: usdt, Amount: 400})
 	wantBalance(t, l, UserAccount("alice", usdt, Available), 600)
@@ -52,7 +50,7 @@ func TestDepositHoldRelease(t *testing.T) {
 }
 
 func TestRejectsInsufficientAndInvalid(t *testing.T) {
-	l := New()
+	l := newMem()
 	mustApply(t, l, Deposit{Key: "d1", User: "alice", Asset: usdt, Amount: 100})
 
 	cases := []struct {
@@ -80,7 +78,7 @@ func TestRejectsInsufficientAndInvalid(t *testing.T) {
 }
 
 func TestSettleWithFeesAndRefund(t *testing.T) {
-	l := New()
+	l := newMem()
 	mustApply(t, l, Deposit{Key: "d1", User: "buyer", Asset: usdt, Amount: 10_000})
 	mustApply(t, l, Deposit{Key: "d2", User: "seller", Asset: btc, Amount: 500})
 	mustApply(t, l, Hold{Key: "h1", User: "buyer", Asset: usdt, Amount: 6_000})
@@ -109,7 +107,7 @@ func TestSettleWithFeesAndRefund(t *testing.T) {
 }
 
 func TestWithdrawLifecycle(t *testing.T) {
-	l := New()
+	l := newMem()
 	mustApply(t, l, Deposit{Key: "d1", User: "alice", Asset: btc, Amount: 1_000})
 	mustApply(t, l, WithdrawRequest{Key: "w1", ID: "W1", User: "alice", Asset: btc, Amount: 300})
 	mustApply(t, l, WithdrawRequest{Key: "w2", ID: "W2", User: "alice", Asset: btc, Amount: 200})
@@ -138,7 +136,7 @@ func TestWithdrawLifecycle(t *testing.T) {
 }
 
 func TestDepositOverflowRejected(t *testing.T) {
-	l := New()
+	l := newMem()
 	mustApply(t, l, Deposit{Key: "d1", User: "a", Asset: btc, Amount: 1 << 62})
 	mustApply(t, l, Deposit{Key: "d2", User: "b", Asset: btc, Amount: 1<<62 - 1})
 	if _, _, err := l.Apply(Deposit{Key: "d3", User: "c", Asset: btc, Amount: 2}); !errors.Is(err, ErrOverflow) {
@@ -148,7 +146,7 @@ func TestDepositOverflowRejected(t *testing.T) {
 }
 
 func TestIdempotentRetry(t *testing.T) {
-	l := New()
+	l := newMem()
 	dep := Deposit{Key: "dep-1", User: "alice", Asset: btc, Amount: 100}
 	first := mustApply(t, l, dep)
 
@@ -177,7 +175,7 @@ func TestIdempotentRetry(t *testing.T) {
 }
 
 func TestRejectedCommandIsNotRecorded(t *testing.T) {
-	l := New()
+	l := newMem()
 	hold := Hold{Key: "h1", User: "alice", Asset: btc, Amount: 50}
 	if _, _, err := l.Apply(hold); !errors.Is(err, ErrInsufficientFunds) {
 		t.Fatalf("expected insufficient funds, got %v", err)
@@ -189,43 +187,7 @@ func TestRejectedCommandIsNotRecorded(t *testing.T) {
 	wantBalance(t, l, UserAccount("alice", btc, Locked), 50)
 }
 
-func fileLedger(t *testing.T, path string) (*Ledger, *FileStore) {
-	t.Helper()
-	fs, err := OpenFileStore(path, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	l, err := Open(fs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return l, fs
-}
-
-func TestFileJournalReplayRebuildsState(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "ledger.journal")
-	l, fs := fileLedger(t, path)
-	mustApply(t, l, Deposit{Key: "d1", User: "alice", Asset: btc, Amount: 1_000})
-	mustApply(t, l, Hold{Key: "h1", User: "alice", Asset: btc, Amount: 300})
-	mustApply(t, l, WithdrawRequest{Key: "w1", ID: "W1", User: "alice", Asset: btc, Amount: 200})
-	want := l.Balances()
-	fs.Close()
-
-	l2, fs2 := fileLedger(t, path)
-	defer fs2.Close()
-	if got := l2.Balances(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("replayed balances %v, want %v", got, want)
-	}
-	if w, ok := l2.Withdrawal("W1"); !ok || w.State != WithdrawalPending {
-		t.Fatalf("withdrawal after replay: %+v %v", w, ok)
-	}
-	if _, replayed, err := l2.Apply(Deposit{Key: "d1", User: "alice", Asset: btc, Amount: 1_000}); err != nil || !replayed {
-		t.Fatalf("idempotency must survive restart: replayed=%v err=%v", replayed, err)
-	}
-	verify(t, l2)
-}
-
-type failingStore struct{ MemStore }
+type failingStore struct{ memStore }
 
 func (*failingStore) Append(Tx) error { return errors.New("disk full") }
 
@@ -244,7 +206,7 @@ func TestFailedPersistLeavesStateUntouched(t *testing.T) {
 }
 
 func TestReplayRejectsTamperedJournal(t *testing.T) {
-	bad := &MemStore{}
+	bad := &memStore{}
 	bad.Append(Tx{Seq: 1, Key: "x", Entries: []Entry{{UserAccount("a", btc, Available), 10}}})
 	if _, err := Open(bad); err == nil {
 		t.Fatal("expected unbalanced replay to fail")

@@ -7,7 +7,8 @@ import (
 	"testing"
 
 	"github.com/gwakko/cex-lab/engine"
-	"github.com/gwakko/cex-lab/ledger"
+	"github.com/gwakko/cex-lab/internal/ledger"
+	"github.com/gwakko/cex-lab/internal/ledger/adapters/memstore"
 )
 
 const (
@@ -26,7 +27,7 @@ func testConfigs() []MarketConfig {
 
 func newExchange(t *testing.T) *Exchange {
 	t.Helper()
-	x, err := New(ledger.New(), testConfigs())
+	x, err := New(memstore.NewLedger(), testConfigs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +175,7 @@ func TestMarketOrdersReleaseUnusedReserve(t *testing.T) {
 }
 
 func TestRestartRecoversBookAndOrderIDs(t *testing.T) {
-	store := &ledger.MemStore{}
+	store := &memstore.Store{}
 	cfgs := testConfigs()
 	open := func() *Exchange {
 		l, err := ledger.Open(store)

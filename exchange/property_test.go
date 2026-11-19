@@ -11,7 +11,8 @@ import (
 	"testing/quick"
 
 	"github.com/gwakko/cex-lab/engine"
-	"github.com/gwakko/cex-lab/ledger"
+	"github.com/gwakko/cex-lab/internal/ledger"
+	"github.com/gwakko/cex-lab/internal/ledger/adapters/memstore"
 )
 
 // source drives a simulation from either a PRNG or fuzzer bytes.
@@ -49,7 +50,7 @@ type openOrder struct{ market, user, id string }
 type sim struct {
 	t       testing.TB
 	ctx     context.Context
-	store   *ledger.MemStore
+	store   *memstore.Store
 	cfgs    []MarketConfig
 	x       *Exchange
 	supply  map[ledger.Asset]int64 // model: deposits - confirmed withdrawals
@@ -60,7 +61,7 @@ type sim struct {
 }
 
 func newSim(t testing.TB) *sim {
-	s := &sim{t: t, ctx: context.Background(), store: &ledger.MemStore{}, cfgs: testConfigs(), supply: map[ledger.Asset]int64{}}
+	s := &sim{t: t, ctx: context.Background(), store: &memstore.Store{}, cfgs: testConfigs(), supply: map[ledger.Asset]int64{}}
 	l, err := ledger.Open(s.store)
 	if err != nil {
 		t.Fatal(err)

@@ -13,9 +13,10 @@ import (
 	"github.com/gwakko/cex-lab/engine"
 	"github.com/gwakko/cex-lab/exchange"
 	"github.com/gwakko/cex-lab/internal/events"
+	"github.com/gwakko/cex-lab/internal/ledger"
+	"github.com/gwakko/cex-lab/internal/ledger/adapters/filestore"
 	"github.com/gwakko/cex-lab/internal/platform/telemetry"
 	"github.com/gwakko/cex-lab/internal/platform/trace"
-	"github.com/gwakko/cex-lab/ledger"
 	"github.com/gwakko/cex-lab/outbox"
 )
 
@@ -25,7 +26,7 @@ type stack struct {
 	reg    *telemetry.Registry
 	logs   *bytes.Buffer
 	logger *slog.Logger
-	store  *ledger.FileStore
+	store  *filestore.Store
 	l      *ledger.Ledger
 	x      *exchange.Exchange
 	health *telemetry.Health
@@ -36,7 +37,7 @@ func newStack(t *testing.T) *stack {
 	s := &stack{reg: telemetry.NewRegistry(), logs: &bytes.Buffer{}, health: &telemetry.Health{}}
 	s.logger = slog.New(slog.NewJSONHandler(s.logs, nil))
 	var err error
-	s.store, err = ledger.OpenFileStore(filepath.Join(t.TempDir(), "ledger.journal"), NewJournal(s.reg, "ledger"))
+	s.store, err = filestore.Open(filepath.Join(t.TempDir(), "ledger.journal"), NewJournal(s.reg, "ledger"))
 	if err != nil {
 		t.Fatal(err)
 	}
