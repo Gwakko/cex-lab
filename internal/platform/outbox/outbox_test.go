@@ -6,37 +6,28 @@ import (
 	"testing"
 
 	"github.com/gwakko/cex-lab/internal/events"
-	"github.com/gwakko/cex-lab/internal/ledger"
-	"github.com/gwakko/cex-lab/internal/ledger/adapters/memstore"
 )
 
-func seededLedger(t *testing.T, n int) *ledger.Ledger {
-	t.Helper()
-	l := memstore.NewLedger()
+// log is a fake Source holding n events.
+type log []events.Event
+
+func (l log) EventsSince(offset int) []events.Event {
+	if offset >= len(l) {
+		return nil
+	}
+	return append([]events.Event(nil), l[offset:]...)
+}
+
+func seededLog(n int) log {
+	var l log
 	for i := range n {
-		if _, _, err := l.Apply(ledger.Deposit{Key: fmt.Sprintf("d%d", i), User: "alice", Asset: "BTC", Amount: 1}); err != nil {
-			t.Fatal(err)
-		}
+		l = append(l, events.Event{ID: fmt.Sprintf("evt-%d", i+1), Source: "test", Type: "deposit", Version: events.SchemaV1, Seq: uint64(i + 1)})
 	}
 	return l
 }
 
-func TestEveryCommitEmitsOneEvent(t *testing.T) {
-	l := seededLedger(t, 3)
-	if _, replayed, _ := l.Apply(ledger.Deposit{Key: "d0", User: "alice", Asset: "BTC", Amount: 1}); !replayed {
-		t.Fatal("expected replay")
-	}
-	evs := l.EventsSince(0)
-	if len(evs) != 3 {
-		t.Fatalf("idempotent retry must not emit a new event, got %d events", len(evs))
-	}
-	if evs[2].ID != "evt-3" || evs[2].Type != "deposit" || evs[2].Key != "d2" || evs[2].Source != "ledger" || evs[2].Version != events.SchemaV1 {
-		t.Fatalf("unexpected event %+v", evs[2])
-	}
-}
-
 func TestRelayRedeliversAfterFailureAndInboxDedups(t *testing.T) {
-	l := seededLedger(t, 5)
+	l := seededLog(5)
 	handled := map[string]int{}
 	inbox := NewInbox(func(e events.Event) error { handled[e.ID]++; return nil })
 
@@ -90,18 +81,5 @@ func TestInboxRetriesFailedHandler(t *testing.T) {
 	in.Handle(e)
 	if count != 1 {
 		t.Fatalf("handled %d times, want 1", count)
-	}
-}
-
-func TestEventsSurviveJournalReplay(t *testing.T) {
-	store := &memstore.Store{}
-	l, _ := ledger.Open(store)
-	l.Apply(ledger.Deposit{Key: "d1", User: "a", Asset: "BTC", Amount: 1})
-	l2, err := ledger.Open(store)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if evs := l2.EventsSince(0); len(evs) != 1 || evs[0].ID != "evt-1" {
-		t.Fatalf("events after replay: %+v", evs)
 	}
 }

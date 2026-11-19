@@ -2,7 +2,10 @@ package core
 
 import (
 	"errors"
+	"fmt"
 	"testing"
+
+	"github.com/gwakko/cex-lab/internal/events"
 )
 
 const (
@@ -210,5 +213,35 @@ func TestReplayRejectsTamperedJournal(t *testing.T) {
 	bad.Append(Tx{Seq: 1, Key: "x", Entries: []Entry{{UserAccount("a", btc, Available), 10}}})
 	if _, err := Open(bad); err == nil {
 		t.Fatal("expected unbalanced replay to fail")
+	}
+}
+
+func TestEveryCommitEmitsOneEvent(t *testing.T) {
+	l := newMem()
+	for i := range 3 {
+		mustApply(t, l, Deposit{Key: fmt.Sprintf("d%d", i), User: "alice", Asset: "BTC", Amount: 1})
+	}
+	if _, replayed, _ := l.Apply(Deposit{Key: "d0", User: "alice", Asset: "BTC", Amount: 1}); !replayed {
+		t.Fatal("expected replay")
+	}
+	evs := l.EventsSince(0)
+	if len(evs) != 3 {
+		t.Fatalf("idempotent retry must not emit a new event, got %d events", len(evs))
+	}
+	if evs[2].ID != "evt-3" || evs[2].Type != "deposit" || evs[2].Key != "d2" || evs[2].Source != EventSource || evs[2].Version != events.SchemaV1 {
+		t.Fatalf("unexpected event %+v", evs[2])
+	}
+}
+
+func TestEventsSurviveJournalReplay(t *testing.T) {
+	store := &memStore{}
+	l, _ := Open(store)
+	l.Apply(Deposit{Key: "d1", User: "a", Asset: "BTC", Amount: 1})
+	l2, err := Open(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evs := l2.EventsSince(0); len(evs) != 1 || evs[0].ID != "evt-1" {
+		t.Fatalf("events after replay: %+v", evs)
 	}
 }

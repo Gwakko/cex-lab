@@ -30,11 +30,11 @@ import (
 	"github.com/gwakko/cex-lab/internal/events"
 	"github.com/gwakko/cex-lab/internal/ledger"
 	"github.com/gwakko/cex-lab/internal/ledger/adapters/filestore"
+	"github.com/gwakko/cex-lab/internal/platform/outbox"
 	"github.com/gwakko/cex-lab/internal/platform/telemetry"
 	"github.com/gwakko/cex-lab/internal/platform/trace"
 	"github.com/gwakko/cex-lab/internal/trading"
 	"github.com/gwakko/cex-lab/internal/trading/adapters/filelog"
-	"github.com/gwakko/cex-lab/outbox"
 )
 
 const (

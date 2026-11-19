@@ -9,8 +9,8 @@ import (
 	"github.com/gwakko/cex-lab/internal/events"
 	"github.com/gwakko/cex-lab/internal/ledger"
 	"github.com/gwakko/cex-lab/internal/ledger/adapters/memstore"
+	"github.com/gwakko/cex-lab/internal/platform/outbox"
 	"github.com/gwakko/cex-lab/internal/platform/telemetry"
-	"github.com/gwakko/cex-lab/outbox"
 )
 
 func TestOutboxMetrics(t *testing.T) {
