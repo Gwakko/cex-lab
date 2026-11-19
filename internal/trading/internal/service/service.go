@@ -1,7 +1,8 @@
-// Package exchange wires the ledger to the matching engines:
+// Package service is the trading application service. It drives the
+// matching engines and reserves and settles funds through LedgerPort:
 // place = hold -> match -> settle each trade -> release leftovers;
 // cancel = cancel in the engine -> release the remaining reserve.
-package exchange
+package service
 
 import (
 	"context"
@@ -13,18 +14,22 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gwakko/cex-lab/engine"
-	"github.com/gwakko/cex-lab/internal/ledger"
 	"github.com/gwakko/cex-lab/internal/platform/trace"
+	"github.com/gwakko/cex-lab/internal/trading/internal/engine"
 )
 
-var ErrUnknownMarket = errors.New("exchange: unknown market")
+var (
+	ErrUnknownMarket = errors.New("exchange: unknown market")
+	// ErrInsufficientFunds is returned (wrapped) by LedgerPort when a reserve
+	// cannot be taken.
+	ErrInsufficientFunds = errors.New("trading: insufficient funds")
+)
 
 // MarketConfig describes one spot market.
 type MarketConfig struct {
 	Symbol      string
-	Base        ledger.Asset
-	Quote       ledger.Asset
+	Base        string
+	Quote       string
 	Tick        int64
 	Lot         int64
 	MakerFeeBps int64
@@ -42,14 +47,14 @@ type market struct {
 	nextID uint64
 }
 
-// Exchange is the application service in front of ledger and engines.
+// Exchange is the application service in front of the ledger and engines.
 type Exchange struct {
-	ledger     *ledger.Ledger
-	markets    map[string]*market
-	symbols    []string // sorted; fixed lock order
-	metrics    Metrics
-	log        *slog.Logger
-	engineOpts []engine.Option
+	ledger        LedgerPort
+	markets       map[string]*market
+	symbols       []string // sorted; fixed lock order
+	metrics       Metrics
+	engineMetrics engine.Metrics
+	log           *slog.Logger
 
 	checkMu   sync.Mutex
 	lastCheck error
@@ -64,13 +69,11 @@ func WithMetrics(m Metrics) Option { return func(x *Exchange) { x.metrics = m } 
 // WithLogger logs order lifecycle events.
 func WithLogger(l *slog.Logger) Option { return func(x *Exchange) { x.log = l } }
 
-// WithEngineOptions passes options to every market's engine.
-func WithEngineOptions(opts ...engine.Option) Option {
-	return func(x *Exchange) { x.engineOpts = append(x.engineOpts, opts...) }
-}
+// WithEngineMetrics reports every market engine's measurements to m.
+func WithEngineMetrics(m engine.Metrics) Option { return func(x *Exchange) { x.engineMetrics = m } }
 
 // New starts one engine per market, recovering each from its log.
-func New(l *ledger.Ledger, cfgs []MarketConfig, opts ...Option) (*Exchange, error) {
+func New(l LedgerPort, cfgs []MarketConfig, opts ...Option) (*Exchange, error) {
 	x := &Exchange{ledger: l, markets: map[string]*market{}, metrics: nopMetrics{}, log: slog.New(slog.DiscardHandler)}
 	for _, o := range opts {
 		o(x)
@@ -81,7 +84,11 @@ func New(l *ledger.Ledger, cfgs []MarketConfig, opts ...Option) (*Exchange, erro
 			return nil, err
 		}
 		spec := engine.MarketSpec{Symbol: c.Symbol, Tick: c.Tick, Lot: c.Lot}
-		eng, err := engine.Start(spec, c.Log, x.engineOpts...)
+		engOpts := []engine.Option{engine.WithLogger(x.log)}
+		if x.engineMetrics != nil {
+			engOpts = append(engOpts, engine.WithMetrics(x.engineMetrics))
+		}
+		eng, err := engine.Start(spec, c.Log, engOpts...)
 		if err != nil {
 			x.Close()
 			return nil, err
@@ -116,8 +123,14 @@ func (x *Exchange) Close() {
 	}
 }
 
-// Ledger exposes the ledger for deposits, withdrawals and queries.
-func (x *Exchange) Ledger() *ledger.Ledger { return x.ledger }
+// Book returns a copy of a market's resting orders (market data query).
+func (x *Exchange) Book(ctx context.Context, symbol string) (engine.Snapshot, error) {
+	m, err := x.market(symbol)
+	if err != nil {
+		return engine.Snapshot{}, err
+	}
+	return m.eng.Snapshot(ctx)
+}
 
 func (x *Exchange) market(symbol string) (*market, error) {
 	m, ok := x.markets[symbol]
@@ -190,7 +203,7 @@ func (x *Exchange) place(ctx context.Context, m *market, req PlaceRequest, start
 		return PlaceResult{}, err
 	}
 	asset, reserve := m.initialReserve(o)
-	_, replayed, err := x.ledger.ApplyContext(ctx, ledger.Hold{Key: "hold:" + o.ID, User: o.User, Asset: asset, Amount: reserve})
+	replayed, err := x.ledger.Hold(ctx, "hold:"+o.ID, o.User, asset, reserve)
 	if err != nil {
 		return PlaceResult{}, fmt.Errorf("exchange: reserve for %s: %w", o.ID, err)
 	}
@@ -254,7 +267,7 @@ func (x *Exchange) Cancel(ctx context.Context, symbol, user, orderID string) (en
 }
 
 // initialReserve is what an order locks before matching.
-func (m *market) initialReserve(o engine.Order) (ledger.Asset, int64) {
+func (m *market) initialReserve(o engine.Order) (string, int64) {
 	switch {
 	case o.Side == engine.Sell:
 		return m.cfg.Base, o.Qty
@@ -267,7 +280,7 @@ func (m *market) initialReserve(o engine.Order) (ledger.Asset, int64) {
 }
 
 // restingReserve is what a resting limit order still locks.
-func (m *market) restingReserve(o engine.Order) (ledger.Asset, int64) {
+func (m *market) restingReserve(o engine.Order) (string, int64) {
 	if o.Side == engine.Sell {
 		return m.cfg.Base, o.Remaining
 	}
@@ -280,7 +293,7 @@ func (m *market) restingReserve(o engine.Order) (ledger.Asset, int64) {
 // refunds the difference in the same ledger transaction.
 func (x *Exchange) settle(ctx context.Context, m *market, taker engine.Order, t engine.Trade, i int) (int64, error) {
 	notional, _ := m.spec.Notional(t.Price, t.Qty)
-	s := ledger.Settle{
+	s := Settlement{
 		Key:      fmt.Sprintf("settle:%s:%d:%d", m.cfg.Symbol, t.Seq, i),
 		Base:     m.cfg.Base,
 		Quote:    m.cfg.Quote,
@@ -303,19 +316,18 @@ func (x *Exchange) settle(ctx context.Context, m *market, taker engine.Order, t 
 	}
 	s.BuyerFee = fee(s.BaseQty, buyerBps)
 	s.SellerFee = fee(s.QuoteQty, sellerBps)
-	if _, _, err := x.ledger.ApplyContext(ctx, s); err != nil {
+	if err := x.ledger.Settle(ctx, s); err != nil {
 		return 0, err
 	}
-	x.metrics.Trade(m.cfg.Symbol, string(m.cfg.Base), string(m.cfg.Quote), s.BaseQty, s.QuoteQty)
+	x.metrics.Trade(m.cfg.Symbol, m.cfg.Base, m.cfg.Quote, s.BaseQty, s.QuoteQty)
 	return used, nil
 }
 
-func (x *Exchange) release(ctx context.Context, key, user string, asset ledger.Asset, amount int64) error {
+func (x *Exchange) release(ctx context.Context, key, user, asset string, amount int64) error {
 	if amount == 0 {
 		return nil
 	}
-	_, _, err := x.ledger.ApplyContext(ctx, ledger.Release{Key: "release:" + key, User: user, Asset: asset, Amount: amount})
-	return err
+	return x.ledger.Release(ctx, "release:"+key, user, asset, amount)
 }
 
 // fee is floor(amount * bps / 10000) without intermediate overflow.
@@ -328,7 +340,7 @@ func fee(amount, bps int64) int64 {
 // rejectReason maps an error to a bounded label value.
 func rejectReason(err error) string {
 	switch {
-	case errors.Is(err, ledger.ErrInsufficientFunds):
+	case errors.Is(err, ErrInsufficientFunds):
 		return "insufficient_funds"
 	case errors.Is(err, engine.ErrInvalidOrder):
 		return "invalid_order"

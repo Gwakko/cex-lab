@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
-	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
@@ -46,7 +45,7 @@ func randomCommands(r *rand.Rand, n int) []Command {
 func TestReplayIsDeterministic(t *testing.T) {
 	for seed := range uint64(20) {
 		r := rand.New(rand.NewPCG(seed, 1))
-		log := &MemLog{}
+		log := &memLog{}
 		e, err := Start(spec, log)
 		if err != nil {
 			t.Fatal(err)
@@ -83,7 +82,7 @@ func TestReplayIsDeterministic(t *testing.T) {
 }
 
 func TestSequenceIsMonotonicAndLoggedFirst(t *testing.T) {
-	log := &MemLog{}
+	log := &memLog{}
 	e, _ := Start(spec, log)
 	defer e.Stop()
 	for i := range 5 {
@@ -103,13 +102,9 @@ func TestSequenceIsMonotonicAndLoggedFirst(t *testing.T) {
 	}
 }
 
-func TestRestartFromFileLog(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "cmd.log")
-	open := func() (*Engine, *FileLog) {
-		fl, err := OpenFileLog(path, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+func TestRestartFromLog(t *testing.T) {
+	fl := &memLog{}
+	open := func() (*Engine, *memLog) {
 		e, err := Start(spec, fl)
 		if err != nil {
 			t.Fatal(err)
@@ -125,10 +120,8 @@ func TestRestartFromFileLog(t *testing.T) {
 	}
 	before, _ := e.Snapshot(ctx)
 	e.Stop()
-	fl.Close()
 
-	e, fl = open()
-	defer fl.Close()
+	e, _ = open()
 	defer e.Stop()
 	after, _ := e.Snapshot(ctx)
 	if !reflect.DeepEqual(before, after) {
@@ -138,10 +131,6 @@ func TestRestartFromFileLog(t *testing.T) {
 		t.Fatalf("last seq %d, want %d", e.LastSeq(), before.Seq)
 	}
 }
-
-type failingLog struct{ MemLog }
-
-func (*failingLog) Append(Command) error { return errors.New("disk full") }
 
 func TestLogFailureDoesNotApply(t *testing.T) {
 	e, _ := Start(spec, &failingLog{})
@@ -157,7 +146,7 @@ func TestLogFailureDoesNotApply(t *testing.T) {
 }
 
 func TestConcurrentSubmitters(t *testing.T) {
-	log := &MemLog{}
+	log := &memLog{}
 	e, _ := Start(spec, log)
 	ctx := context.Background()
 	var wg sync.WaitGroup

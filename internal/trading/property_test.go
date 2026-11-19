@@ -1,4 +1,4 @@
-package exchange
+package trading_test
 
 import (
 	"context"
@@ -10,9 +10,11 @@ import (
 	"testing"
 	"testing/quick"
 
-	"github.com/gwakko/cex-lab/engine"
+	"github.com/gwakko/cex-lab/internal/app"
 	"github.com/gwakko/cex-lab/internal/ledger"
 	"github.com/gwakko/cex-lab/internal/ledger/adapters/memstore"
+	"github.com/gwakko/cex-lab/internal/trading"
+	"github.com/gwakko/cex-lab/internal/trading/internal/engine"
 )
 
 // source drives a simulation from either a PRNG or fuzzer bytes.
@@ -51,8 +53,9 @@ type sim struct {
 	t       testing.TB
 	ctx     context.Context
 	store   *memstore.Store
-	cfgs    []MarketConfig
-	x       *Exchange
+	cfgs    []trading.MarketConfig
+	x       *trading.Service
+	l       *ledger.Ledger
 	supply  map[ledger.Asset]int64 // model: deposits - confirmed withdrawals
 	pending []string
 	orders  []openOrder
@@ -66,7 +69,8 @@ func newSim(t testing.TB) *sim {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.x, err = New(l, s.cfgs); err != nil {
+	s.l = l
+	if s.x, err = trading.New(app.NewLedgerPort(l), s.cfgs); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(s.x.Close)
@@ -108,7 +112,7 @@ func (s *sim) step(src source) {
 
 // apply runs a ledger command issued by the simulation itself.
 func (s *sim) apply(cmd ledger.Command, allowed ...error) bool {
-	_, _, err := s.x.Ledger().Apply(cmd)
+	_, _, err := s.l.Apply(cmd)
 	if err != nil {
 		s.expect(err, allowed...)
 		return false
@@ -137,16 +141,16 @@ func (s *sim) deposit(src source) {
 
 func (s *sim) place(src source) {
 	cfg := s.cfgs[src.intn(len(s.cfgs))]
-	req := PlaceRequest{
+	req := trading.PlaceRequest{
 		Market: cfg.Symbol,
 		User:   simUsers[src.intn(len(simUsers))],
-		Side:   engine.Side(1 + src.intn(2)),
-		Type:   engine.Limit,
+		Side:   trading.Side(1 + src.intn(2)),
+		Type:   trading.Limit,
 		Qty:    cfg.Lot * int64(1+src.intn(10)),
 	}
 	if src.intn(5) == 0 {
-		req.Type = engine.Market
-		if req.Side == engine.Buy {
+		req.Type = trading.Market
+		if req.Side == trading.Buy {
 			req.QuoteBudget = int64(1 + src.intn(3_000))
 		}
 	} else {
@@ -174,8 +178,8 @@ func (s *sim) cancel(src source) {
 	}
 	_, err := s.x.Cancel(s.ctx, o.market, user, o.id)
 	if err != nil {
-		s.expect(err, engine.ErrUnknownOrder, engine.ErrNotOwner)
-		if !errors.Is(err, engine.ErrUnknownOrder) {
+		s.expect(err, trading.ErrUnknownOrder, trading.ErrNotOwner)
+		if !errors.Is(err, trading.ErrUnknownOrder) {
 			return
 		}
 	}
@@ -206,7 +210,7 @@ func (s *sim) finishWithdrawal(src source) {
 		s.apply(ledger.WithdrawFail{Key: s.key("wf"), ID: id})
 		return
 	}
-	w, _ := s.x.Ledger().Withdrawal(id)
+	w, _ := s.l.Withdrawal(id)
 	if s.apply(ledger.WithdrawConfirm{Key: s.key("wc"), ID: id}) {
 		s.supply[w.Asset] -= w.Amount
 	}
@@ -217,7 +221,7 @@ func (s *sim) retryLast() {
 	if s.last == nil {
 		return
 	}
-	l := s.x.Ledger()
+	l := s.l
 	before, events := l.Balances(), len(l.EventsSince(0))
 	_, replayed, err := l.Apply(s.last)
 	if err != nil || !replayed {
@@ -233,7 +237,7 @@ func (s *sim) checkInvariants() {
 	if err := s.x.Check(s.ctx); err != nil {
 		s.t.Fatal(err)
 	}
-	balances := s.x.Ledger().Balances()
+	balances := s.l.Balances()
 	held := map[ledger.Asset]int64{}
 	for acc, b := range balances {
 		if acc.Kind != ledger.External {
@@ -241,7 +245,7 @@ func (s *sim) checkInvariants() {
 		}
 	}
 	for _, a := range simAssets {
-		if got := s.x.Ledger().Supply(a); got != s.supply[a] {
+		if got := s.l.Supply(a); got != s.supply[a] {
 			s.t.Fatalf("%s supply = %d, model says %d", a, got, s.supply[a])
 		}
 		if held[a] != s.supply[a] {
@@ -258,7 +262,7 @@ func (s *sim) checkReplay() {
 	if err != nil {
 		s.t.Fatal(err)
 	}
-	if !reflect.DeepEqual(l2.Balances(), s.x.Ledger().Balances()) {
+	if !reflect.DeepEqual(l2.Balances(), s.l.Balances()) {
 		s.t.Fatal("ledger replay differs from live balances")
 	}
 	for _, cfg := range s.cfgs {
@@ -267,7 +271,7 @@ func (s *sim) checkReplay() {
 		if err != nil {
 			s.t.Fatal(err)
 		}
-		live, err := s.x.markets[cfg.Symbol].eng.Snapshot(s.ctx)
+		live, err := s.x.Book(s.ctx, cfg.Symbol)
 		if err != nil {
 			s.t.Fatal(err)
 		}
@@ -319,17 +323,17 @@ func TestConcurrentTradingKeepsInvariants(t *testing.T) {
 				cfg := s.cfgs[r.IntN(len(s.cfgs))]
 				if len(mine) > 0 && r.IntN(3) == 0 {
 					o := mine[r.IntN(len(mine))]
-					if _, err := s.x.Cancel(s.ctx, o.market, user, o.id); err != nil && !errors.Is(err, engine.ErrUnknownOrder) {
+					if _, err := s.x.Cancel(s.ctx, o.market, user, o.id); err != nil && !errors.Is(err, trading.ErrUnknownOrder) {
 						t.Error(err)
 					}
 					continue
 				}
 				if i%50 == 0 {
 					id := fmt.Sprintf("cw-%d-%d", w, i)
-					s.x.Ledger().Apply(ledger.WithdrawRequest{Key: id, ID: id, User: user, Asset: usdt, Amount: 10})
+					s.l.Apply(ledger.WithdrawRequest{Key: id, ID: id, User: user, Asset: usdt, Amount: 10})
 				}
-				res, err := s.x.Place(s.ctx, PlaceRequest{
-					Market: cfg.Symbol, User: user, Side: engine.Side(1 + r.IntN(2)), Type: engine.Limit,
+				res, err := s.x.Place(s.ctx, trading.PlaceRequest{
+					Market: cfg.Symbol, User: user, Side: trading.Side(1 + r.IntN(2)), Type: trading.Limit,
 					Price: cfg.Tick * (100/cfg.Tick - 3 + int64(r.IntN(7))), Qty: cfg.Lot * int64(1+r.IntN(10)),
 				})
 				if err != nil {

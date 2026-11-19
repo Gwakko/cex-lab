@@ -1,29 +1,27 @@
-package exchange
+package service
 
 import (
 	"context"
 	"errors"
 	"time"
-
-	"github.com/gwakko/cex-lab/internal/ledger"
 )
 
 // Check asserts the cross-component invariants while holding every market
 // lock, so it sees a quiescent state:
-//   - ledger.Verify: entries balance per asset, balances match entries, no
-//     negative user/system balance, in-flight == pending withdrawals;
+//   - LedgerPort.Verify: the ledger's own checks (entries balance per asset,
+//     balances match entries, no negative balance, in-flight == pending);
 //   - no market book is crossed;
 //   - every locked balance equals the reserve of that user's resting orders.
 //
-// Violations are *ledger.InvariantError. Every run is reported to Metrics and
-// remembered for LastCheckError (readiness).
+// Violations implement InvariantName() string. Every run is reported to
+// Metrics and remembered for LastCheckError (readiness).
 func (x *Exchange) Check(ctx context.Context) error {
 	err := x.check(ctx)
 	violated := ""
-	var ie *ledger.InvariantError
+	var named interface{ InvariantName() string }
 	switch {
-	case errors.As(err, &ie):
-		violated = ie.Invariant
+	case errors.As(err, &named):
+		violated = named.InvariantName()
 	case err != nil:
 		violated = "check_failed"
 	}
@@ -54,7 +52,7 @@ func (x *Exchange) check(ctx context.Context) error {
 		return err
 	}
 
-	expected := map[ledger.Account]int64{}
+	expected := map[Holding]int64{}
 	for _, s := range x.symbols {
 		m := x.markets[s]
 		snap, err := m.eng.Snapshot(ctx)
@@ -62,23 +60,23 @@ func (x *Exchange) check(ctx context.Context) error {
 			return err
 		}
 		if snap.Crossed() {
-			return ledger.Violation("book_not_crossed", "%s bid %d >= ask %d", s, snap.Bids[0].Price, snap.Asks[0].Price)
+			return violation("book_not_crossed", "%s bid %d >= ask %d", s, snap.Bids[0].Price, snap.Asks[0].Price)
 		}
 		for _, o := range append(snap.Bids, snap.Asks...) {
 			asset, amount := m.restingReserve(o)
-			expected[ledger.UserAccount(o.User, asset, ledger.Locked)] += amount
+			expected[Holding{User: o.User, Asset: asset}] += amount
 		}
 	}
 
-	balances := x.ledger.Balances()
+	balances := x.ledger.LockedBalances()
 	for acc, b := range balances {
-		if acc.Kind == ledger.Locked && b != expected[acc] {
-			return ledger.Violation("locked_equals_reserves", "%s = %d, resting orders reserve %d", acc, b, expected[acc])
+		if b != expected[acc] {
+			return violation("locked_equals_reserves", "%s = %d, resting orders reserve %d", acc, b, expected[acc])
 		}
 	}
 	for acc, want := range expected {
 		if balances[acc] != want {
-			return ledger.Violation("locked_equals_reserves", "%s = %d, resting orders reserve %d", acc, balances[acc], want)
+			return violation("locked_equals_reserves", "%s = %d, resting orders reserve %d", acc, balances[acc], want)
 		}
 	}
 	return nil

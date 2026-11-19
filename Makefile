@@ -10,7 +10,7 @@ test:
 	go test -race -count=1 ./...
 
 fuzz:
-	go test -run '^$$' -fuzz FuzzExchange -fuzztime 30s ./exchange/
+	go test -run '^$$' -fuzz FuzzExchange -fuzztime 30s ./internal/trading/
 
 bench:
 	go test -run '^$$' -bench . ./internal/platform/telemetry/ ./instrument/

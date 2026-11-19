@@ -23,21 +23,22 @@ import (
 	"time"
 
 	"github.com/gwakko/cex-lab/chain"
-	"github.com/gwakko/cex-lab/engine"
-	"github.com/gwakko/cex-lab/exchange"
 	"github.com/gwakko/cex-lab/instrument"
+	"github.com/gwakko/cex-lab/internal/app"
 	"github.com/gwakko/cex-lab/internal/events"
 	"github.com/gwakko/cex-lab/internal/ledger"
 	"github.com/gwakko/cex-lab/internal/ledger/adapters/filestore"
 	"github.com/gwakko/cex-lab/internal/platform/telemetry"
 	"github.com/gwakko/cex-lab/internal/platform/trace"
+	"github.com/gwakko/cex-lab/internal/trading"
+	"github.com/gwakko/cex-lab/internal/trading/adapters/filelog"
 	"github.com/gwakko/cex-lab/outbox"
 )
 
 const (
-	btc  ledger.Asset = "BTC"   // minimal unit: satoshi
-	usdt ledger.Asset = "USDT"  // minimal unit: cent (a simplification)
-	lot               = 100_000 // 0.001 BTC
+	btc  = "BTC"   // minimal unit: satoshi
+	usdt = "USDT"  // minimal unit: cent (a simplification)
+	lot  = 100_000 // 0.001 BTC
 )
 
 func main() {
@@ -57,20 +58,20 @@ func main() {
 	store, err := filestore.Open(filepath.Join(dir, "ledger.journal"), instrument.NewJournal(reg, "ledger"))
 	must(err)
 	defer store.Close()
-	cmdLog, err := engine.OpenFileLog(filepath.Join(dir, "btc-usdt.cmdlog"), instrument.NewJournal(reg, "engine_BTC-USDT"))
+	cmdLog, err := filelog.Open(filepath.Join(dir, "btc-usdt.cmdlog"), instrument.NewJournal(reg, "engine_BTC-USDT"))
 	must(err)
 	defer cmdLog.Close()
 
 	l, err := ledger.Open(store, ledger.WithMetrics(instrument.NewLedger(reg)), ledger.WithLogger(logger))
 	must(err)
-	x, err := exchange.New(l, []exchange.MarketConfig{{
+	x, err := trading.New(app.NewLedgerPort(l), []trading.MarketConfig{{
 		Symbol: "BTC-USDT", Base: btc, Quote: usdt,
 		Tick: 1, Lot: lot, MakerFeeBps: 10, TakerFeeBps: 20,
 		Log: cmdLog,
 	}},
-		exchange.WithMetrics(instrument.NewExchange(reg)),
-		exchange.WithLogger(logger),
-		exchange.WithEngineOptions(engine.WithMetrics(instrument.NewEngine(reg)), engine.WithLogger(logger)))
+		trading.WithMetrics(instrument.NewExchange(reg)),
+		trading.WithLogger(logger),
+		trading.WithEngineMetrics(instrument.NewEngine(reg)))
 	must(err)
 	defer x.Close()
 
@@ -91,13 +92,13 @@ func main() {
 	const followed = "demo-order-1"
 	orders := []struct {
 		trace string
-		req   exchange.PlaceRequest
+		req   trading.PlaceRequest
 	}{
-		{"", exchange.PlaceRequest{Market: "BTC-USDT", User: "alice", Side: engine.Sell, Type: engine.Limit, Price: 6_000, Qty: 20 * lot}},
-		{"", exchange.PlaceRequest{Market: "BTC-USDT", User: "alice", Side: engine.Sell, Type: engine.Limit, Price: 6_050, Qty: 30 * lot}},
-		{followed, exchange.PlaceRequest{Market: "BTC-USDT", User: "bob", Side: engine.Buy, Type: engine.Limit, Price: 6_100, Qty: 35 * lot}},
-		{"", exchange.PlaceRequest{Market: "BTC-USDT", User: "bob", Side: engine.Buy, Type: engine.Limit, Price: 5_900, Qty: 10 * lot}},
-		{"", exchange.PlaceRequest{Market: "BTC-USDT", User: "carol", Side: engine.Buy, Type: engine.Limit, Price: 5_900, Qty: 10 * lot}},
+		{"", trading.PlaceRequest{Market: "BTC-USDT", User: "alice", Side: trading.Sell, Type: trading.Limit, Price: 6_000, Qty: 20 * lot}},
+		{"", trading.PlaceRequest{Market: "BTC-USDT", User: "alice", Side: trading.Sell, Type: trading.Limit, Price: 6_050, Qty: 30 * lot}},
+		{followed, trading.PlaceRequest{Market: "BTC-USDT", User: "bob", Side: trading.Buy, Type: trading.Limit, Price: 6_100, Qty: 35 * lot}},
+		{"", trading.PlaceRequest{Market: "BTC-USDT", User: "bob", Side: trading.Buy, Type: trading.Limit, Price: 5_900, Qty: 10 * lot}},
+		{"", trading.PlaceRequest{Market: "BTC-USDT", User: "carol", Side: trading.Buy, Type: trading.Limit, Price: 5_900, Qty: 10 * lot}},
 	}
 	var lastID string
 	for _, o := range orders {

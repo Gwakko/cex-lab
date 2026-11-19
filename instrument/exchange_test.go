@@ -10,13 +10,14 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/gwakko/cex-lab/engine"
-	"github.com/gwakko/cex-lab/exchange"
+	"github.com/gwakko/cex-lab/internal/app"
 	"github.com/gwakko/cex-lab/internal/events"
 	"github.com/gwakko/cex-lab/internal/ledger"
 	"github.com/gwakko/cex-lab/internal/ledger/adapters/filestore"
 	"github.com/gwakko/cex-lab/internal/platform/telemetry"
 	"github.com/gwakko/cex-lab/internal/platform/trace"
+	"github.com/gwakko/cex-lab/internal/trading"
+	"github.com/gwakko/cex-lab/internal/trading/adapters/memlog"
 	"github.com/gwakko/cex-lab/outbox"
 )
 
@@ -28,7 +29,7 @@ type stack struct {
 	logger *slog.Logger
 	store  *filestore.Store
 	l      *ledger.Ledger
-	x      *exchange.Exchange
+	x      *trading.Service
 	health *telemetry.Health
 }
 
@@ -46,12 +47,12 @@ func newStack(t *testing.T) *stack {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.x, err = exchange.New(s.l, []exchange.MarketConfig{{
-		Symbol: market, Base: "BTC", Quote: "USDT", Tick: 1, Lot: 10, MakerFeeBps: 10, TakerFeeBps: 20, Log: &engine.MemLog{},
+	s.x, err = trading.New(app.NewLedgerPort(s.l), []trading.MarketConfig{{
+		Symbol: market, Base: "BTC", Quote: "USDT", Tick: 1, Lot: 10, MakerFeeBps: 10, TakerFeeBps: 20, Log: &memlog.Log{},
 	}},
-		exchange.WithMetrics(NewExchange(s.reg)),
-		exchange.WithLogger(s.logger),
-		exchange.WithEngineOptions(engine.WithMetrics(NewEngine(s.reg)), engine.WithLogger(s.logger)))
+		trading.WithMetrics(NewExchange(s.reg)),
+		trading.WithLogger(s.logger),
+		trading.WithEngineMetrics(NewEngine(s.reg)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,8 +69,8 @@ func (s *stack) deposit(t *testing.T, key, user string, asset ledger.Asset, amou
 	}
 }
 
-func (s *stack) place(ctx context.Context, user string, side engine.Side, price, qty int64) (exchange.PlaceResult, error) {
-	return s.x.Place(ctx, exchange.PlaceRequest{Market: market, User: user, Side: side, Type: engine.Limit, Price: price, Qty: qty})
+func (s *stack) place(ctx context.Context, user string, side trading.Side, price, qty int64) (trading.PlaceResult, error) {
+	return s.x.Place(ctx, trading.PlaceRequest{Market: market, User: user, Side: side, Type: trading.Limit, Price: price, Qty: qty})
 }
 
 func TestExchangeScenarioMetrics(t *testing.T) {
@@ -79,17 +80,17 @@ func TestExchangeScenarioMetrics(t *testing.T) {
 	s.deposit(t, "dep-bob", "bob", "BTC", 1_000)
 	s.deposit(t, "dep-alice", "alice", "USDT", 1_000_000) // client retry
 
-	ask, err := s.place(ctx, "bob", engine.Sell, 100, 100)
+	ask, err := s.place(ctx, "bob", trading.Sell, 100, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.place(trace.WithID(ctx, "order-trace-1"), "alice", engine.Buy, 100, 50); err != nil {
+	if _, err := s.place(trace.WithID(ctx, "order-trace-1"), "alice", trading.Buy, 100, 50); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.place(ctx, "carol", engine.Buy, 100, 10); !errors.Is(err, ledger.ErrInsufficientFunds) {
+	if _, err := s.place(ctx, "carol", trading.Buy, 100, 10); !errors.Is(err, ledger.ErrInsufficientFunds) {
 		t.Fatalf("carol: %v", err)
 	}
-	if _, err := s.place(ctx, "alice", engine.Buy, 100, 15); !errors.Is(err, engine.ErrInvalidOrder) {
+	if _, err := s.place(ctx, "alice", trading.Buy, 100, 15); !errors.Is(err, trading.ErrInvalidOrder) {
 		t.Fatalf("off-lot: %v", err)
 	}
 	if _, err := s.x.Cancel(ctx, market, "bob", ask.OrderID); err != nil {
@@ -129,8 +130,8 @@ func TestOneOrderIsTraceableAcrossLayers(t *testing.T) {
 	ctx := context.Background()
 	s.deposit(t, "d1", "alice", "USDT", 1_000_000)
 	s.deposit(t, "d2", "bob", "BTC", 1_000)
-	s.place(ctx, "bob", engine.Sell, 100, 100)
-	if _, err := s.place(trace.WithID(ctx, "order-trace-1"), "alice", engine.Buy, 101, 50); err != nil {
+	s.place(ctx, "bob", trading.Sell, 100, 100)
+	if _, err := s.place(trace.WithID(ctx, "order-trace-1"), "alice", trading.Buy, 101, 50); err != nil {
 		t.Fatal(err)
 	}
 	relay := outbox.NewRelay(s.l, func(events.Event) error { return nil }, 0, outbox.WithLogger(s.logger))
@@ -180,7 +181,7 @@ func TestInjectedInvariantViolationFlipsReadiness(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := s.x.Check(ctx)
-	var ie *ledger.InvariantError
+	var ie *trading.InvariantError
 	if !errors.As(err, &ie) || ie.Invariant != "locked_equals_reserves" {
 		t.Fatalf("expected locked_equals_reserves violation, got %v", err)
 	}
