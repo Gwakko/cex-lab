@@ -33,6 +33,9 @@ func WithMetrics(m Metrics) Option { return service.WithMetrics(m) }
 // WithEngineMetrics reports per-market engine measurements.
 func WithEngineMetrics(m EngineMetrics) Option { return service.WithEngineMetrics(m) }
 
+// WithMarketData publishes public trades and book deltas to sink.
+func WithMarketData(sink MarketDataSink) Option { return service.WithMarketData(sink) }
+
 // WithLogger logs order lifecycle and engine commands.
 func WithLogger(l *slog.Logger) Option { return service.WithLogger(l) }
 

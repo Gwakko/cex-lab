@@ -13,6 +13,10 @@ type (
 	Holding    = service.Holding
 )
 
+// MarketDataSink receives public trades and book deltas (internal/app passes
+// the marketdata module). It must not block.
+type MarketDataSink = service.MarketDataSink
+
 // CommandLog stores engine commands before they are applied (adapters:
 // adapters/filelog, adapters/memlog).
 type CommandLog = engine.Log

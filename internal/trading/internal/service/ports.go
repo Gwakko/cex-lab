@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"fmt"
+
+	"github.com/gwakko/cex-lab/internal/events"
 )
 
 // LedgerPort is what trading needs from a ledger. Trading defines it and the
@@ -59,4 +61,11 @@ func (e *InvariantError) Error() string {
 
 func violation(invariant, format string, args ...any) error {
 	return &InvariantError{Invariant: invariant, Detail: fmt.Sprintf(format, args...)}
+}
+
+// MarketDataSink receives public market data. It is called on the market's
+// engine goroutine in sequence order and must not block.
+type MarketDataSink interface {
+	PublishTrade(events.TradeV1)
+	PublishBookDelta(events.BookDeltaV1)
 }

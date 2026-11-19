@@ -7,6 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/gwakko/cex-lab/internal/events"
 )
 
 // Metrics receives engine measurements. Labels are bounded: market, type, side.
@@ -26,11 +28,21 @@ func (nopMetrics) MatchDuration(string, time.Duration) {}
 func (nopMetrics) BookDepth(string, int, int)          {}
 func (nopMetrics) LastSeq(string, uint64)              {}
 
+// Listener is told about every successfully applied command that produced
+// fills or changed the book, on the writer goroutine, in sequence order. It
+// must not block.
+type Listener interface {
+	Applied(market string, cmd Command, res Result, bids, asks []events.Level)
+}
+
 // Option configures an Engine.
 type Option func(*Engine)
 
 // WithMetrics reports engine measurements to m.
 func WithMetrics(m Metrics) Option { return func(e *Engine) { e.metrics = m } }
+
+// WithListener reports applied commands and book changes to l.
+func WithListener(l Listener) Option { return func(e *Engine) { e.listener = l } }
 
 // WithLogger logs every applied command to log.
 func WithLogger(l *slog.Logger) Option { return func(e *Engine) { e.logger = l } }
@@ -48,9 +60,10 @@ type Engine struct {
 	lastSeq  atomic.Uint64
 	// waiting counts submitters blocked on the writer. Only the writer reports
 	// it, after each dequeue, so the gauge is never overwritten by a stale value.
-	waiting atomic.Int64
-	metrics Metrics
-	logger  *slog.Logger
+	waiting  atomic.Int64
+	metrics  Metrics
+	logger   *slog.Logger
+	listener Listener
 }
 
 type request struct {
@@ -118,6 +131,7 @@ func (e *Engine) execute(book *Book, cmd Command) Result {
 	e.lastSeq.Store(cmd.Seq)
 	e.metrics.CommandApplied(e.spec.Symbol, cmd.Type.String())
 	e.reportBook(book)
+	e.notify(book, cmd, res)
 
 	attrs := []any{"seq", cmd.Seq, "type", cmd.Type.String(), "order_id", cmd.Order.ID, "trace_id", cmd.TraceID, "trades", len(res.Trades)}
 	if res.Err != nil {
@@ -126,6 +140,16 @@ func (e *Engine) execute(book *Book, cmd Command) Result {
 		e.logger.Info("engine command applied", attrs...)
 	}
 	return res
+}
+
+func (e *Engine) notify(book *Book, cmd Command, res Result) {
+	if e.listener == nil || res.Err != nil {
+		return
+	}
+	bids, asks := book.Changes()
+	if len(res.Trades) > 0 || len(bids) > 0 || len(asks) > 0 {
+		e.listener.Applied(e.spec.Symbol, cmd, res, bids, asks)
+	}
 }
 
 func (e *Engine) reportBook(book *Book) {

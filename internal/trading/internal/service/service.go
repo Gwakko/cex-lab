@@ -54,6 +54,7 @@ type Exchange struct {
 	symbols       []string // sorted; fixed lock order
 	metrics       Metrics
 	engineMetrics engine.Metrics
+	marketData    MarketDataSink
 	log           *slog.Logger
 
 	checkMu   sync.Mutex
@@ -72,6 +73,9 @@ func WithLogger(l *slog.Logger) Option { return func(x *Exchange) { x.log = l } 
 // WithEngineMetrics reports every market engine's measurements to m.
 func WithEngineMetrics(m engine.Metrics) Option { return func(x *Exchange) { x.engineMetrics = m } }
 
+// WithMarketData publishes trades and book changes to sink.
+func WithMarketData(sink MarketDataSink) Option { return func(x *Exchange) { x.marketData = sink } }
+
 // New starts one engine per market, recovering each from its log.
 func New(l LedgerPort, cfgs []MarketConfig, opts ...Option) (*Exchange, error) {
 	x := &Exchange{ledger: l, markets: map[string]*market{}, metrics: nopMetrics{}, log: slog.New(slog.DiscardHandler)}
@@ -87,6 +91,9 @@ func New(l LedgerPort, cfgs []MarketConfig, opts ...Option) (*Exchange, error) {
 		engOpts := []engine.Option{engine.WithLogger(x.log)}
 		if x.engineMetrics != nil {
 			engOpts = append(engOpts, engine.WithMetrics(x.engineMetrics))
+		}
+		if x.marketData != nil {
+			engOpts = append(engOpts, engine.WithListener(marketData{x.marketData}))
 		}
 		eng, err := engine.Start(spec, c.Log, engOpts...)
 		if err != nil {

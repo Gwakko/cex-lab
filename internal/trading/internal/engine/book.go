@@ -1,9 +1,12 @@
 package engine
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
 	"sort"
+
+	"github.com/gwakko/cex-lab/internal/events"
 )
 
 type level struct {
@@ -19,6 +22,14 @@ type Book struct {
 	asks   []*level // best (lowest) first
 	orders map[string]*Order
 	seq    uint64
+	// touched records the price levels the last command changed, for
+	// market data deltas. It never influences matching.
+	touched map[levelKey]struct{}
+}
+
+type levelKey struct {
+	side  Side
+	price int64
 }
 
 // NewBook returns an empty book.
@@ -26,7 +37,7 @@ func NewBook(spec MarketSpec) (*Book, error) {
 	if err := spec.validate(); err != nil {
 		return nil, err
 	}
-	return &Book{spec: spec, orders: map[string]*Order{}}, nil
+	return &Book{spec: spec, orders: map[string]*Order{}, touched: map[levelKey]struct{}{}}, nil
 }
 
 // Seq is the sequence number of the last applied command.
@@ -38,6 +49,7 @@ func (b *Book) Apply(cmd Command) Result {
 		return Result{Seq: cmd.Seq, Err: fmt.Errorf("%w: got %d, want %d", ErrOutOfOrder, cmd.Seq, b.seq+1)}
 	}
 	b.seq = cmd.Seq
+	clear(b.touched)
 	switch cmd.Type {
 	case Place:
 		return b.place(cmd)
@@ -99,6 +111,7 @@ func (b *Book) match(t *Order) []Trade {
 		})
 		t.Remaining -= qty
 		maker.Remaining -= qty
+		b.touch(maker.Side, lvl.price)
 		if maker.Remaining == 0 {
 			b.popHead(opp)
 		}
@@ -149,6 +162,7 @@ func (b *Book) rest(o *Order) {
 		*levels = slices.Insert(*levels, i, &level{price: o.Price, orders: []*Order{o}})
 	}
 	b.orders[o.ID] = o
+	b.touch(o.Side, o.Price)
 }
 
 func (b *Book) cancel(cmd Command) Result {
@@ -170,8 +184,41 @@ func (b *Book) cancel(cmd Command) Result {
 		*levels = slices.Delete(*levels, i, i+1)
 	}
 	delete(b.orders, o.ID)
+	b.touch(o.Side, o.Price)
 	res.Order = *o
 	return res
+}
+
+func (b *Book) touch(s Side, price int64) { b.touched[levelKey{s, price}] = struct{}{} }
+
+// Changes returns the aggregate quantity now resting at every price level the
+// last command touched (0 if the level is gone), bids best first, asks best
+// first.
+func (b *Book) Changes() (bids, asks []events.Level) {
+	for k := range b.touched {
+		l := events.Level{Price: k.price, Qty: b.levelQty(k.side, k.price)}
+		if k.side == Buy {
+			bids = append(bids, l)
+		} else {
+			asks = append(asks, l)
+		}
+	}
+	slices.SortFunc(bids, func(x, y events.Level) int { return cmp.Compare(y.Price, x.Price) })
+	slices.SortFunc(asks, func(x, y events.Level) int { return cmp.Compare(x.Price, y.Price) })
+	return bids, asks
+}
+
+func (b *Book) levelQty(s Side, price int64) int64 {
+	levels := *b.levels(s)
+	i := levelIndex(levels, s, price)
+	if i == len(levels) || levels[i].price != price {
+		return 0
+	}
+	var q int64
+	for _, o := range levels[i].orders {
+		q += o.Remaining
+	}
+	return q
 }
 
 // Depth returns the number of price levels on each side.
