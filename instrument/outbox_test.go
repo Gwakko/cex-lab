@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gwakko/cex-lab/internal/events"
 	"github.com/gwakko/cex-lab/ledger"
 	"github.com/gwakko/cex-lab/outbox"
 	"github.com/gwakko/cex-lab/telemetry"
@@ -21,9 +22,9 @@ func TestOutboxMetrics(t *testing.T) {
 	oldest := l.EventsSince(0)[2].Time
 	clock := func() time.Time { return oldest.Add(90 * time.Second) }
 
-	inbox := outbox.NewInbox(func(ledger.Event) error { return nil }, outbox.WithMetrics(m))
+	inbox := outbox.NewInbox(func(events.Event) error { return nil }, outbox.WithMetrics(m))
 	calls := 0
-	flaky := func(e ledger.Event) error {
+	flaky := func(e events.Event) error {
 		if calls++; calls == 3 {
 			return errors.New("broker down")
 		}

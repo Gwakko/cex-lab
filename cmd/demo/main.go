@@ -26,6 +26,7 @@ import (
 	"github.com/gwakko/cex-lab/engine"
 	"github.com/gwakko/cex-lab/exchange"
 	"github.com/gwakko/cex-lab/instrument"
+	"github.com/gwakko/cex-lab/internal/events"
 	"github.com/gwakko/cex-lab/ledger"
 	"github.com/gwakko/cex-lab/outbox"
 	"github.com/gwakko/cex-lab/telemetry"
@@ -125,7 +126,7 @@ func main() {
 	fmt.Println("\n== outbox")
 	om := instrument.NewOutbox(reg)
 	seen := 0
-	inbox := outbox.NewInbox(func(ledger.Event) error { seen++; return nil }, outbox.WithMetrics(om))
+	inbox := outbox.NewInbox(func(events.Event) error { seen++; return nil }, outbox.WithMetrics(om))
 	n, err := outbox.NewRelay(l, inbox.Handle, 0, outbox.WithMetrics(om), outbox.WithLogger(logger)).Drain()
 	must(err)
 	_, err = outbox.NewRelay(l, inbox.Handle, 0, outbox.WithMetrics(om)).Drain() // redelivery after a "crash"

@@ -1,4 +1,4 @@
-// Package outbox delivers ledger events at least once and deduplicates them on
+// Package outbox delivers events at least once and deduplicates them on
 // the consumer side.
 package outbox
 
@@ -8,16 +8,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gwakko/cex-lab/ledger"
+	"github.com/gwakko/cex-lab/internal/events"
 )
 
-// Source is an ordered, append-only event log (the ledger's outbox).
+// Source is an ordered, append-only event log (for example the ledger's outbox).
 type Source interface {
-	EventsSince(offset int) []ledger.Event
+	EventsSince(offset int) []events.Event
 }
 
 // Handler processes one event.
-type Handler func(ledger.Event) error
+type Handler func(events.Event) error
 
 // Metrics receives relay and inbox measurements.
 type Metrics interface {
@@ -119,7 +119,7 @@ func NewInbox(h Handler, opts ...Option) *Inbox {
 }
 
 // Handle runs the handler once per event ID.
-func (i *Inbox) Handle(e ledger.Event) error {
+func (i *Inbox) Handle(e events.Event) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.seen[e.ID] {

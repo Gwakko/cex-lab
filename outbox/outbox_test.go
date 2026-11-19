@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/gwakko/cex-lab/internal/events"
 	"github.com/gwakko/cex-lab/ledger"
 )
 
@@ -28,7 +29,7 @@ func TestEveryCommitEmitsOneEvent(t *testing.T) {
 	if len(evs) != 3 {
 		t.Fatalf("idempotent retry must not emit a new event, got %d events", len(evs))
 	}
-	if evs[2].ID != "evt-3" || evs[2].Type != "deposit" || evs[2].Key != "d2" {
+	if evs[2].ID != "evt-3" || evs[2].Type != "deposit" || evs[2].Key != "d2" || evs[2].Source != "ledger" || evs[2].Version != events.SchemaV1 {
 		t.Fatalf("unexpected event %+v", evs[2])
 	}
 }
@@ -36,10 +37,10 @@ func TestEveryCommitEmitsOneEvent(t *testing.T) {
 func TestRelayRedeliversAfterFailureAndInboxDedups(t *testing.T) {
 	l := seededLedger(t, 5)
 	handled := map[string]int{}
-	inbox := NewInbox(func(e ledger.Event) error { handled[e.ID]++; return nil })
+	inbox := NewInbox(func(e events.Event) error { handled[e.ID]++; return nil })
 
 	calls := 0
-	flaky := func(e ledger.Event) error {
+	flaky := func(e events.Event) error {
 		calls++
 		if calls == 3 {
 			return errors.New("broker unavailable")
@@ -72,14 +73,14 @@ func TestRelayRedeliversAfterFailureAndInboxDedups(t *testing.T) {
 func TestInboxRetriesFailedHandler(t *testing.T) {
 	fail := true
 	count := 0
-	in := NewInbox(func(ledger.Event) error {
+	in := NewInbox(func(events.Event) error {
 		if fail {
 			return errors.New("transient")
 		}
 		count++
 		return nil
 	})
-	e := ledger.Event{ID: "evt-1"}
+	e := events.Event{ID: "evt-1"}
 	if err := in.Handle(e); err == nil {
 		t.Fatal("expected error")
 	}

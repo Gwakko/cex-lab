@@ -12,6 +12,7 @@ import (
 
 	"github.com/gwakko/cex-lab/engine"
 	"github.com/gwakko/cex-lab/exchange"
+	"github.com/gwakko/cex-lab/internal/events"
 	"github.com/gwakko/cex-lab/ledger"
 	"github.com/gwakko/cex-lab/outbox"
 	"github.com/gwakko/cex-lab/telemetry"
@@ -131,7 +132,7 @@ func TestOneOrderIsTraceableAcrossLayers(t *testing.T) {
 	if _, err := s.place(trace.WithID(ctx, "order-trace-1"), "alice", engine.Buy, 101, 50); err != nil {
 		t.Fatal(err)
 	}
-	relay := outbox.NewRelay(s.l, func(ledger.Event) error { return nil }, 0, outbox.WithLogger(s.logger))
+	relay := outbox.NewRelay(s.l, func(events.Event) error { return nil }, 0, outbox.WithLogger(s.logger))
 	if _, err := relay.Drain(); err != nil {
 		t.Fatal(err)
 	}
