@@ -2,6 +2,8 @@ package ledger
 
 import (
 	"errors"
+	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -185,4 +187,66 @@ func TestRejectedCommandIsNotRecorded(t *testing.T) {
 		t.Fatalf("retry after funding: replayed=%v err=%v", replayed, err)
 	}
 	wantBalance(t, l, UserAccount("alice", btc, Locked), 50)
+}
+
+func fileLedger(t *testing.T, path string) (*Ledger, *FileStore) {
+	t.Helper()
+	fs, err := OpenFileStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := Open(fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return l, fs
+}
+
+func TestFileJournalReplayRebuildsState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ledger.journal")
+	l, fs := fileLedger(t, path)
+	mustApply(t, l, Deposit{Key: "d1", User: "alice", Asset: btc, Amount: 1_000})
+	mustApply(t, l, Hold{Key: "h1", User: "alice", Asset: btc, Amount: 300})
+	mustApply(t, l, WithdrawRequest{Key: "w1", ID: "W1", User: "alice", Asset: btc, Amount: 200})
+	want := l.Balances()
+	fs.Close()
+
+	l2, fs2 := fileLedger(t, path)
+	defer fs2.Close()
+	if got := l2.Balances(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("replayed balances %v, want %v", got, want)
+	}
+	if w, ok := l2.Withdrawal("W1"); !ok || w.State != WithdrawalPending {
+		t.Fatalf("withdrawal after replay: %+v %v", w, ok)
+	}
+	if _, replayed, err := l2.Apply(Deposit{Key: "d1", User: "alice", Asset: btc, Amount: 1_000}); err != nil || !replayed {
+		t.Fatalf("idempotency must survive restart: replayed=%v err=%v", replayed, err)
+	}
+	verify(t, l2)
+}
+
+type failingStore struct{ MemStore }
+
+func (*failingStore) Append(Tx) error { return errors.New("disk full") }
+
+func TestFailedPersistLeavesStateUntouched(t *testing.T) {
+	l, err := Open(&failingStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := l.Apply(Deposit{Key: "d1", User: "a", Asset: btc, Amount: 5}); err == nil {
+		t.Fatal("expected persist error")
+	}
+	wantBalance(t, l, UserAccount("a", btc, Available), 0)
+	if _, replayed, _ := l.Apply(Deposit{Key: "d1", User: "a", Asset: btc, Amount: 5}); replayed {
+		t.Fatal("unpersisted key must not be remembered")
+	}
+}
+
+func TestReplayRejectsTamperedJournal(t *testing.T) {
+	bad := &MemStore{}
+	bad.Append(Tx{Seq: 1, Key: "x", Entries: []Entry{{UserAccount("a", btc, Available), 10}}})
+	if _, err := Open(bad); err == nil {
+		t.Fatal("expected unbalanced replay to fail")
+	}
 }

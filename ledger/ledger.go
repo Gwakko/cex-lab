@@ -19,22 +19,52 @@ type Tx struct {
 	Withdrawal  *Withdrawal `json:",omitempty"`
 }
 
-// Ledger applies commands one at a time under a mutex.
+// Ledger applies commands one at a time under a mutex. Its in-memory state is
+// a projection of the Store and can always be rebuilt by replay.
 type Ledger struct {
 	mu          sync.Mutex
+	store       Store
 	txs         []Tx
 	byKey       map[string]int
 	balances    map[Account]int64
 	withdrawals map[string]Withdrawal
 }
 
-// New returns an empty ledger.
+// New returns an empty ledger backed by a MemStore.
 func New() *Ledger {
-	return &Ledger{
+	l, _ := Open(&MemStore{}) // an empty MemStore cannot fail to load
+	return l
+}
+
+// Open rebuilds a ledger by replaying every transaction in store.
+func Open(store Store) (*Ledger, error) {
+	l := &Ledger{
+		store:       store,
 		byKey:       map[string]int{},
 		balances:    map[Account]int64{},
 		withdrawals: map[string]Withdrawal{},
 	}
+	txs, err := store.Load()
+	if err != nil {
+		return nil, err
+	}
+	for _, tx := range txs {
+		if err := l.checkReplayed(tx); err != nil {
+			return nil, fmt.Errorf("ledger: replay tx %d: %w", tx.Seq, err)
+		}
+		l.apply(tx)
+	}
+	return l, nil
+}
+
+func (l *Ledger) checkReplayed(tx Tx) error {
+	if want := uint64(len(l.txs)) + 1; tx.Seq != want {
+		return fmt.Errorf("sequence gap: want %d", want)
+	}
+	if _, dup := l.byKey[tx.Key]; dup {
+		return fmt.Errorf("duplicate key %q", tx.Key)
+	}
+	return checkBalanced(tx.Entries)
 }
 
 // Apply validates cmd against current balances and commits it.
@@ -73,6 +103,9 @@ func (l *Ledger) Apply(cmd Command) (tx Tx, replayed bool, err error) {
 	}
 	if err := checkBalanced(tx.Entries); err != nil {
 		return Tx{}, false, err
+	}
+	if err := l.store.Append(tx); err != nil {
+		return Tx{}, false, fmt.Errorf("ledger: persist: %w", err)
 	}
 	l.apply(tx)
 	return tx, false, nil
