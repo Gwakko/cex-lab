@@ -14,7 +14,7 @@ type rec struct {
 
 func TestAppendAndReload(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "j.log")
-	j, err := Open(path)
+	j, err := Open(path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,7 +26,7 @@ func TestAppendAndReload(t *testing.T) {
 	}
 	j.Close()
 
-	j, err = Open(path)
+	j, err = Open(path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestAppendAndReload(t *testing.T) {
 
 func TestTornTailIsTruncated(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "j.log")
-	j, _ := Open(path)
+	j, _ := Open(path, nil)
 	if err := j.Append(rec{1, "ok"}); err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestTornTailIsTruncated(t *testing.T) {
 	f.WriteString(`{"N":2,"S":"tor`) // crash mid-write
 	f.Close()
 
-	j, _ = Open(path)
+	j, _ = Open(path, nil)
 	defer j.Close()
 	got, err := LoadAll[rec](j)
 	if err != nil {
@@ -72,7 +72,7 @@ func TestTornTailIsTruncated(t *testing.T) {
 func TestCorruptRecordFailsLoudly(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "j.log")
 	os.WriteFile(path, []byte("{\"N\":1}\nnot json\n"), 0o600)
-	j, _ := Open(path)
+	j, _ := Open(path, nil)
 	defer j.Close()
 	if _, err := LoadAll[rec](j); err == nil {
 		t.Fatal("expected error for corrupt record")

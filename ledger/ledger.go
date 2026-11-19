@@ -1,21 +1,29 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
+	"time"
+
+	"github.com/gwakko/cex-lab/telemetry/trace"
 )
 
 // ErrIdempotencyConflict means a key was reused for a different command.
 var ErrIdempotencyConflict = errors.New("ledger: idempotency key reused with a different payload")
 
 // Event is an outbox record. It is stored in the same transaction as the
-// entries it describes, so a committed change always has its event.
+// entries it describes, so a committed change always has its event. TraceID
+// links it back to the request that caused it.
 type Event struct {
-	ID    string
-	Type  string
-	Key   string
-	TxSeq uint64
+	ID      string
+	Type    string
+	Key     string
+	TxSeq   uint64
+	TraceID string    `json:",omitempty"`
+	Time    time.Time // commit time, used for outbox age
 }
 
 // Tx is one committed command: its entries and the event it emits.
@@ -24,10 +32,41 @@ type Tx struct {
 	Key         string
 	Fingerprint string
 	Op          string
+	TraceID     string `json:",omitempty"`
 	Entries     []Entry
 	Withdrawal  *Withdrawal `json:",omitempty"`
 	Events      []Event
 }
+
+// Command results reported to Metrics.
+const (
+	ResultApplied  = "applied"
+	ResultReplay   = "idempotent_replay"
+	ResultRejected = "rejected"
+	ResultError    = "error"
+)
+
+// Metrics receives ledger measurements. Labels are bounded: op and result.
+type Metrics interface {
+	CommandDone(op, result string)
+	IdempotencyConflict()
+	EntriesWritten(n int)
+}
+
+type nopMetrics struct{}
+
+func (nopMetrics) CommandDone(string, string) {}
+func (nopMetrics) IdempotencyConflict()       {}
+func (nopMetrics) EntriesWritten(int)         {}
+
+// Option configures a Ledger.
+type Option func(*Ledger)
+
+// WithMetrics reports command outcomes to m.
+func WithMetrics(m Metrics) Option { return func(l *Ledger) { l.metrics = m } }
+
+// WithLogger logs commits, replays and rejections to log.
+func WithLogger(log *slog.Logger) Option { return func(l *Ledger) { l.log = log } }
 
 // Ledger applies commands one at a time under a mutex. Its in-memory state is
 // a projection of the Store and can always be rebuilt by replay.
@@ -39,21 +78,28 @@ type Ledger struct {
 	balances    map[Account]int64
 	withdrawals map[string]Withdrawal
 	events      []Event
+	metrics     Metrics
+	log         *slog.Logger
 }
 
 // New returns an empty ledger backed by a MemStore.
-func New() *Ledger {
-	l, _ := Open(&MemStore{}) // an empty MemStore cannot fail to load
+func New(opts ...Option) *Ledger {
+	l, _ := Open(&MemStore{}, opts...) // an empty MemStore cannot fail to load
 	return l
 }
 
 // Open rebuilds a ledger by replaying every transaction in store.
-func Open(store Store) (*Ledger, error) {
+func Open(store Store, opts ...Option) (*Ledger, error) {
 	l := &Ledger{
 		store:       store,
 		byKey:       map[string]int{},
 		balances:    map[Account]int64{},
 		withdrawals: map[string]Withdrawal{},
+		metrics:     nopMetrics{},
+		log:         slog.New(slog.DiscardHandler),
+	}
+	for _, o := range opts {
+		o(l)
 	}
 	txs, err := store.Load()
 	if err != nil {
@@ -78,49 +124,75 @@ func (l *Ledger) checkReplayed(tx Tx) error {
 	return checkBalanced(tx.Entries)
 }
 
-// Apply validates cmd against current balances and commits it.
+// Apply is ApplyContext without a request context.
+func (l *Ledger) Apply(cmd Command) (tx Tx, replayed bool, err error) {
+	return l.ApplyContext(context.Background(), cmd)
+}
+
+// ApplyContext validates cmd against current balances and commits it. The
+// trace id in ctx is stored on the transaction and its event.
 //
 // A key that was already committed returns the stored transaction with
 // replayed=true and changes nothing; the same key with a different payload
 // fails with ErrIdempotencyConflict. Rejected commands are not recorded, so a
 // retry after "insufficient funds" is evaluated again.
-func (l *Ledger) Apply(cmd Command) (tx Tx, replayed bool, err error) {
+func (l *Ledger) ApplyContext(ctx context.Context, cmd Command) (tx Tx, replayed bool, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	key := cmd.IdempotencyKey()
+	op, key, traceID := cmd.op(), cmd.IdempotencyKey(), trace.ID(ctx)
+	log := l.log.With("op", op, "idempotency_key", key, "trace_id", traceID)
+	result := ResultApplied
+	defer func() { l.metrics.CommandDone(op, result) }()
+
 	if key == "" {
+		result = ResultRejected
 		return Tx{}, false, fmt.Errorf("%w: empty idempotency key", ErrInvalidCommand)
 	}
 	fp := fingerprint(cmd)
 	if i, ok := l.byKey[key]; ok {
 		if l.txs[i].Fingerprint != fp {
+			result = ResultRejected
+			l.metrics.IdempotencyConflict()
+			log.Warn("idempotency conflict", "original_seq", l.txs[i].Seq)
 			return Tx{}, false, fmt.Errorf("%w: %s", ErrIdempotencyConflict, key)
 		}
+		result = ResultReplay
+		log.Info("idempotent replay", "seq", l.txs[i].Seq)
 		return l.txs[i], true, nil
 	}
 
 	p, err := cmd.plan(l)
 	if err != nil {
+		result = ResultRejected
+		log.Info("ledger command rejected", "error", err)
 		return Tx{}, false, err
 	}
 	seq := uint64(len(l.txs)) + 1
+	ev := Event{ID: fmt.Sprintf("evt-%d", seq), Type: op, Key: key, TxSeq: seq, TraceID: traceID, Time: time.Now().UTC()}
 	tx = Tx{
 		Seq:         seq,
 		Key:         key,
 		Fingerprint: fp,
-		Op:          cmd.op(),
+		Op:          op,
+		TraceID:     traceID,
 		Entries:     p.entries,
 		Withdrawal:  p.withdrawal,
-		Events:      []Event{{ID: fmt.Sprintf("evt-%d", seq), Type: cmd.op(), Key: key, TxSeq: seq}},
+		Events:      []Event{ev},
 	}
 	if err := checkBalanced(tx.Entries); err != nil {
+		result = ResultError
+		log.Error("unbalanced transaction refused", "error", err)
 		return Tx{}, false, err
 	}
 	if err := l.store.Append(tx); err != nil {
+		result = ResultError
+		log.Error("ledger persist failed", "error", err)
 		return Tx{}, false, fmt.Errorf("ledger: persist: %w", err)
 	}
 	l.apply(tx)
+	l.metrics.EntriesWritten(len(tx.Entries))
+	log.Info("ledger tx committed", "seq", seq, "event_id", ev.ID, "entries", len(tx.Entries))
 	return tx, false, nil
 }
 
@@ -217,15 +289,15 @@ func (l *Ledger) Verify() error {
 	}
 	for asset, s := range sums {
 		if s != 0 {
-			return fmt.Errorf("ledger: %s entries sum to %d", asset, s)
+			return Violation("entries_sum_zero", "%s entries sum to %d", asset, s)
 		}
 	}
 	for a, b := range l.balances {
 		if recomputed[a] != b {
-			return fmt.Errorf("ledger: %s balance %d, entries say %d", a, b, recomputed[a])
+			return Violation("balance_matches_entries", "%s balance %d, entries say %d", a, b, recomputed[a])
 		}
 		if b < 0 && !a.mayBeNegative() {
-			return fmt.Errorf("ledger: %s is negative (%d)", a, b)
+			return Violation("non_negative_balance", "%s is negative (%d)", a, b)
 		}
 	}
 	inFlight := map[Asset]int64{}
@@ -236,8 +308,23 @@ func (l *Ledger) Verify() error {
 	}
 	for a, b := range l.balances {
 		if a.Owner == System && a.Kind == WithdrawalsInFlight && b != inFlight[a.Asset] {
-			return fmt.Errorf("ledger: %s is %d, pending withdrawals total %d", a, b, inFlight[a.Asset])
+			return Violation("in_flight_matches_pending", "%s is %d, pending withdrawals total %d", a, b, inFlight[a.Asset])
 		}
 	}
 	return nil
+}
+
+// InvariantError names the invariant that failed, so it can be alerted on.
+type InvariantError struct {
+	Invariant string
+	Detail    string
+}
+
+func (e *InvariantError) Error() string {
+	return "invariant " + e.Invariant + " violated: " + e.Detail
+}
+
+// Violation builds an *InvariantError.
+func Violation(invariant, format string, args ...any) error {
+	return &InvariantError{Invariant: invariant, Detail: fmt.Sprintf(format, args...)}
 }

@@ -191,7 +191,7 @@ func TestRejectedCommandIsNotRecorded(t *testing.T) {
 
 func fileLedger(t *testing.T, path string) (*Ledger, *FileStore) {
 	t.Helper()
-	fs, err := OpenFileStore(path)
+	fs, err := OpenFileStore(path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

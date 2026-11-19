@@ -106,7 +106,7 @@ func TestSequenceIsMonotonicAndLoggedFirst(t *testing.T) {
 func TestRestartFromFileLog(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cmd.log")
 	open := func() (*Engine, *FileLog) {
-		fl, err := OpenFileLog(path)
+		fl, err := OpenFileLog(path, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -38,9 +38,9 @@ type FileLog struct {
 	j *journal.File
 }
 
-// OpenFileLog opens or creates the log at path.
-func OpenFileLog(path string) (*FileLog, error) {
-	j, err := journal.Open(path)
+// OpenFileLog opens or creates the log at path. obs may be nil.
+func OpenFileLog(path string, obs journal.Observer) (*FileLog, error) {
+	j, err := journal.Open(path, obs)
 	if err != nil {
 		return nil, err
 	}
@@ -50,6 +50,9 @@ func OpenFileLog(path string) (*FileLog, error) {
 func (l *FileLog) Append(c Command) error   { return l.j.Append(c) }
 func (l *FileLog) Load() ([]Command, error) { return journal.LoadAll[Command](l.j) }
 func (l *FileLog) Close() error             { return l.j.Close() }
+
+// Err reports whether the last append failed (log not writable).
+func (l *FileLog) Err() error { return l.j.Err() }
 
 // Replay rebuilds a book from a command log.
 func Replay(spec MarketSpec, cmds []Command) (*Book, []Result, error) {
