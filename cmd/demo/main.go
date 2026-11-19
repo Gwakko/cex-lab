@@ -22,9 +22,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gwakko/cex-lab/chain"
 	"github.com/gwakko/cex-lab/instrument"
 	"github.com/gwakko/cex-lab/internal/app"
+	"github.com/gwakko/cex-lab/internal/custody"
+	"github.com/gwakko/cex-lab/internal/custody/adapters/fakechain"
+	"github.com/gwakko/cex-lab/internal/custody/adapters/memcursor"
 	"github.com/gwakko/cex-lab/internal/events"
 	"github.com/gwakko/cex-lab/internal/ledger"
 	"github.com/gwakko/cex-lab/internal/ledger/adapters/filestore"
@@ -210,19 +212,19 @@ func printTrace(logs *bytes.Buffer, traceID string) {
 	}
 }
 
-// chainDeposit credits alice's BTC through the watcher on a fake chain.
+// chainDeposit credits alice's BTC through the watcher on a fake custody.
 func chainDeposit(ctx context.Context, l *ledger.Ledger, reg *telemetry.Registry, logger *slog.Logger) {
-	fc := chain.NewFakeChain()
-	credit := func(ctx context.Context, d chain.Deposit) error {
+	fc := fakechain.New()
+	credit := func(ctx context.Context, d custody.Deposit) error {
 		_, _, err := l.ApplyContext(ctx, ledger.Deposit{Key: "chain:" + d.Key(), User: "alice", Asset: ledger.Asset(d.Asset), Amount: d.Amount})
 		return err
 	}
-	w, err := chain.NewWatcher(fc, &chain.MemStateStore{}, credit, chain.Config{
+	w, err := custody.NewWatcher(fc, &memcursor.Store{}, credit, custody.Config{
 		Confirmations: 3, Watched: []string{"addr-alice"}, StartBlock: 1,
 		Metrics: instrument.NewChain(reg), Logger: logger,
 	})
 	must(err)
-	fc.Mine(chain.Transfer{TxHash: "0xfeed", To: "addr-alice", Asset: string(btc), Amount: 100 * lot})
+	fc.Mine(custody.Transfer{TxHash: "0xfeed", To: "addr-alice", Asset: string(btc), Amount: 100 * lot})
 	for i := range 3 {
 		must(w.Poll(ctx))
 		fmt.Printf("block %d: pending=%d credited=%d\n", i+1, len(w.Pending()), len(w.Credited()))

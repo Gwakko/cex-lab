@@ -1,4 +1,4 @@
-package chain
+package watch
 
 import (
 	"cmp"
@@ -31,10 +31,10 @@ func (a *ReorgAlert) Error() string {
 
 func (a *ReorgAlert) Unwrap() error { return ErrConfirmedDepositReorged }
 
-// Crediter books a confirmed deposit. It must be idempotent by Transfer.Key:
+// DepositCreditor books a confirmed deposit. It must be idempotent by Transfer.Key:
 // after a crash the watcher may credit the same deposit again.
 // The context carries a trace id for the credit.
-type Crediter func(context.Context, Deposit) error
+type DepositCreditor func(context.Context, Deposit) error
 
 // Metrics receives watcher measurements. Labels are bounded: asset.
 type Metrics interface {
@@ -69,18 +69,18 @@ type Config struct {
 	Logger        *slog.Logger // optional
 }
 
-// Watcher polls a Client, tracks pending deposits and credits confirmed ones.
+// Watcher polls a ChainClient, tracks pending deposits and credits confirmed ones.
 type Watcher struct {
-	client Client
-	store  StateStore
-	credit Crediter
+	client ChainClient
+	store  CursorStore
+	credit DepositCreditor
 	cfg    Config
 	st     State
 	halt   error // set by a ReorgAlert; every later Poll returns it
 }
 
 // NewWatcher resumes from the saved state, or starts at cfg.StartBlock.
-func NewWatcher(c Client, store StateStore, credit Crediter, cfg Config) (*Watcher, error) {
+func NewWatcher(c ChainClient, store CursorStore, credit DepositCreditor, cfg Config) (*Watcher, error) {
 	if cfg.HashWindow == 0 {
 		cfg.HashWindow = 128
 	}

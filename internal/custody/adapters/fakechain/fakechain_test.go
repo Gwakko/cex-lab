@@ -1,15 +1,17 @@
-package chain
+package fakechain
 
 import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/gwakko/cex-lab/internal/custody"
 )
 
 func TestFakeChainLinksAndReorgs(t *testing.T) {
 	ctx := context.Background()
-	c := NewFakeChain()
-	tr := Transfer{TxHash: "0xaa", To: "addr1", Asset: "ETH", Amount: 5}
+	c := New()
+	tr := custody.Transfer{TxHash: "0xaa", To: "addr1", Asset: "ETH", Amount: 5}
 	b1 := c.Mine(tr)
 	b2 := c.Mine()
 	if b2.Parent != b1.Hash {
@@ -30,7 +32,7 @@ func TestFakeChainLinksAndReorgs(t *testing.T) {
 	if latest != 3 || h1.Hash == b1.Hash {
 		t.Fatalf("reorg did not replace blocks: latest=%d h1=%v", latest, h1)
 	}
-	if _, err := c.HeaderByNumber(ctx, 4); !errors.Is(err, ErrNotFound) {
+	if _, err := c.HeaderByNumber(ctx, 4); !errors.Is(err, custody.ErrNotFound) {
 		t.Fatalf("beyond tip: %v", err)
 	}
 	if err := c.Reorg(10); err == nil {

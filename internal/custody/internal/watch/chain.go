@@ -1,6 +1,6 @@
-// Package chain watches a blockchain for deposits to exchange addresses and
+// Package watch watches a blockchain for deposits to exchange addresses and
 // credits them only after enough confirmations, surviving reorgs.
-package chain
+package watch
 
 import (
 	"context"
@@ -31,8 +31,8 @@ type Transfer struct {
 // Key is the idempotency key for crediting this transfer.
 func (t Transfer) Key() string { return fmt.Sprintf("%s:%d", t.TxHash, t.LogIndex) }
 
-// Client is the minimal read API the watcher needs from a node.
-type Client interface {
+// ChainClient is the minimal read API the watcher needs from a node.
+type ChainClient interface {
 	LatestBlock(ctx context.Context) (uint64, error)
 	HeaderByNumber(ctx context.Context, n uint64) (Header, error)
 	TransfersTo(ctx context.Context, blockHash string, addrs []string) ([]Transfer, error)
