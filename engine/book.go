@@ -174,6 +174,9 @@ func (b *Book) cancel(cmd Command) Result {
 	return res
 }
 
+// Depth returns the number of price levels on each side.
+func (b *Book) Depth() (bids, asks int) { return len(b.bids), len(b.asks) }
+
 // Snapshot is a copy of the resting orders in priority order.
 type Snapshot struct {
 	Seq  uint64

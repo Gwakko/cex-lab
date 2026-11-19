@@ -46,6 +46,16 @@ func (s Side) opposite() Side {
 
 type OrderType uint8
 
+func (t OrderType) String() string {
+	switch t {
+	case Limit:
+		return "limit"
+	case Market:
+		return "market"
+	}
+	return fmt.Sprintf("type(%d)", t)
+}
+
 const (
 	Limit OrderType = iota + 1
 	// Market orders never rest. A market buy is bounded by QuoteBudget, so the
@@ -141,6 +151,16 @@ type Trade struct {
 
 type CommandType uint8
 
+func (t CommandType) String() string {
+	switch t {
+	case Place:
+		return "place"
+	case Cancel:
+		return "cancel"
+	}
+	return fmt.Sprintf("command(%d)", t)
+}
+
 const (
 	Place CommandType = iota + 1
 	Cancel
@@ -149,9 +169,10 @@ const (
 // Command is the unit written to the command log. For Cancel only Order.ID and
 // Order.User are used.
 type Command struct {
-	Seq   uint64
-	Type  CommandType
-	Order Order
+	Seq     uint64
+	Type    CommandType
+	Order   Order
+	TraceID string `json:",omitempty"` // correlation only; never affects matching
 }
 
 // Result is the outcome of one command. For Place, Order is the taker after
