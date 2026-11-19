@@ -9,6 +9,15 @@ import (
 // ErrIdempotencyConflict means a key was reused for a different command.
 var ErrIdempotencyConflict = errors.New("ledger: idempotency key reused with a different payload")
 
+// Event is an outbox record. It is stored in the same transaction as the
+// entries it describes, so a committed change always has its event.
+type Event struct {
+	ID    string
+	Type  string
+	Key   string
+	TxSeq uint64
+}
+
 // Tx is one committed command: its entries and the event it emits.
 type Tx struct {
 	Seq         uint64
@@ -17,6 +26,7 @@ type Tx struct {
 	Op          string
 	Entries     []Entry
 	Withdrawal  *Withdrawal `json:",omitempty"`
+	Events      []Event
 }
 
 // Ledger applies commands one at a time under a mutex. Its in-memory state is
@@ -28,6 +38,7 @@ type Ledger struct {
 	byKey       map[string]int
 	balances    map[Account]int64
 	withdrawals map[string]Withdrawal
+	events      []Event
 }
 
 // New returns an empty ledger backed by a MemStore.
@@ -93,13 +104,15 @@ func (l *Ledger) Apply(cmd Command) (tx Tx, replayed bool, err error) {
 	if err != nil {
 		return Tx{}, false, err
 	}
+	seq := uint64(len(l.txs)) + 1
 	tx = Tx{
-		Seq:         uint64(len(l.txs)) + 1,
+		Seq:         seq,
 		Key:         key,
 		Fingerprint: fp,
 		Op:          cmd.op(),
 		Entries:     p.entries,
 		Withdrawal:  p.withdrawal,
+		Events:      []Event{{ID: fmt.Sprintf("evt-%d", seq), Type: cmd.op(), Key: key, TxSeq: seq}},
 	}
 	if err := checkBalanced(tx.Entries); err != nil {
 		return Tx{}, false, err
@@ -126,6 +139,17 @@ func (l *Ledger) apply(tx Tx) {
 	}
 	l.byKey[tx.Key] = len(l.txs)
 	l.txs = append(l.txs, tx)
+	l.events = append(l.events, tx.Events...)
+}
+
+// EventsSince returns outbox events from position offset onwards.
+func (l *Ledger) EventsSince(offset int) []Event {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if offset >= len(l.events) {
+		return nil
+	}
+	return append([]Event(nil), l.events[offset:]...)
 }
 
 func checkBalanced(entries []Entry) error {
