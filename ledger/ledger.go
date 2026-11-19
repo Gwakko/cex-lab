@@ -1,23 +1,29 @@
 package ledger
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 )
 
+// ErrIdempotencyConflict means a key was reused for a different command.
+var ErrIdempotencyConflict = errors.New("ledger: idempotency key reused with a different payload")
+
 // Tx is one committed command: its entries and the event it emits.
 type Tx struct {
-	Seq        uint64
-	Key        string
-	Op         string
-	Entries    []Entry
-	Withdrawal *Withdrawal `json:",omitempty"`
+	Seq         uint64
+	Key         string
+	Fingerprint string
+	Op          string
+	Entries     []Entry
+	Withdrawal  *Withdrawal `json:",omitempty"`
 }
 
 // Ledger applies commands one at a time under a mutex.
 type Ledger struct {
 	mu          sync.Mutex
 	txs         []Tx
+	byKey       map[string]int
 	balances    map[Account]int64
 	withdrawals map[string]Withdrawal
 }
@@ -25,32 +31,57 @@ type Ledger struct {
 // New returns an empty ledger.
 func New() *Ledger {
 	return &Ledger{
+		byKey:       map[string]int{},
 		balances:    map[Account]int64{},
 		withdrawals: map[string]Withdrawal{},
 	}
 }
 
 // Apply validates cmd against current balances and commits it.
-func (l *Ledger) Apply(cmd Command) (Tx, error) {
+//
+// A key that was already committed returns the stored transaction with
+// replayed=true and changes nothing; the same key with a different payload
+// fails with ErrIdempotencyConflict. Rejected commands are not recorded, so a
+// retry after "insufficient funds" is evaluated again.
+func (l *Ledger) Apply(cmd Command) (tx Tx, replayed bool, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	key := cmd.IdempotencyKey()
+	if key == "" {
+		return Tx{}, false, fmt.Errorf("%w: empty idempotency key", ErrInvalidCommand)
+	}
+	fp := fingerprint(cmd)
+	if i, ok := l.byKey[key]; ok {
+		if l.txs[i].Fingerprint != fp {
+			return Tx{}, false, fmt.Errorf("%w: %s", ErrIdempotencyConflict, key)
+		}
+		return l.txs[i], true, nil
+	}
+
 	p, err := cmd.plan(l)
 	if err != nil {
-		return Tx{}, err
+		return Tx{}, false, err
 	}
-	tx := Tx{
-		Seq:        uint64(len(l.txs)) + 1,
-		Key:        cmd.IdempotencyKey(),
-		Op:         cmd.op(),
-		Entries:    p.entries,
-		Withdrawal: p.withdrawal,
+	tx = Tx{
+		Seq:         uint64(len(l.txs)) + 1,
+		Key:         key,
+		Fingerprint: fp,
+		Op:          cmd.op(),
+		Entries:     p.entries,
+		Withdrawal:  p.withdrawal,
 	}
 	if err := checkBalanced(tx.Entries); err != nil {
-		return Tx{}, err
+		return Tx{}, false, err
 	}
 	l.apply(tx)
-	return tx, nil
+	return tx, false, nil
+}
+
+// fingerprint identifies a command's type and payload. Commands are flat
+// structs, so %+v is a stable canonical form.
+func fingerprint(cmd Command) string {
+	return fmt.Sprintf("%T%+v", cmd, cmd)
 }
 
 func (l *Ledger) apply(tx Tx) {
@@ -60,6 +91,7 @@ func (l *Ledger) apply(tx Tx) {
 	if tx.Withdrawal != nil {
 		l.withdrawals[tx.Withdrawal.ID] = *tx.Withdrawal
 	}
+	l.byKey[tx.Key] = len(l.txs)
 	l.txs = append(l.txs, tx)
 }
 

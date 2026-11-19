@@ -12,7 +12,7 @@ const (
 
 func mustApply(t *testing.T, l *Ledger, c Command) Tx {
 	t.Helper()
-	tx, err := l.Apply(c)
+	tx, _, err := l.Apply(c)
 	if err != nil {
 		t.Fatalf("apply %T: %v", c, err)
 	}
@@ -68,7 +68,7 @@ func TestRejectsInsufficientAndInvalid(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := l.Apply(tc.cmd); !errors.Is(err, tc.want) {
+			if _, _, err := l.Apply(tc.cmd); !errors.Is(err, tc.want) {
 				t.Fatalf("got %v, want %v", err, tc.want)
 			}
 		})
@@ -100,7 +100,7 @@ func TestSettleWithFeesAndRefund(t *testing.T) {
 	wantBalance(t, l, SystemAccount(usdt, Fees), 10)
 	verify(t, l)
 
-	_, err := l.Apply(Settle{Key: "s2", Buyer: "buyer", Seller: "seller", Base: btc, Quote: usdt, BaseQty: 1, QuoteQty: 1})
+	_, _, err := l.Apply(Settle{Key: "s2", Buyer: "buyer", Seller: "seller", Base: btc, Quote: usdt, BaseQty: 1, QuoteQty: 1})
 	if !errors.Is(err, ErrInsufficientFunds) {
 		t.Fatalf("settle without buyer reserve: %v", err)
 	}
@@ -124,13 +124,13 @@ func TestWithdrawLifecycle(t *testing.T) {
 	}
 	verify(t, l)
 
-	if _, err := l.Apply(WithdrawConfirm{Key: "c2", ID: "W2"}); !errors.Is(err, ErrWithdrawalState) {
+	if _, _, err := l.Apply(WithdrawConfirm{Key: "c2", ID: "W2"}); !errors.Is(err, ErrWithdrawalState) {
 		t.Fatalf("confirm failed withdrawal: %v", err)
 	}
-	if _, err := l.Apply(WithdrawFail{Key: "f3", ID: "nope"}); !errors.Is(err, ErrUnknownWithdrawal) {
+	if _, _, err := l.Apply(WithdrawFail{Key: "f3", ID: "nope"}); !errors.Is(err, ErrUnknownWithdrawal) {
 		t.Fatalf("unknown withdrawal: %v", err)
 	}
-	if _, err := l.Apply(WithdrawRequest{Key: "w3", ID: "W1", User: "alice", Asset: btc, Amount: 1}); !errors.Is(err, ErrInvalidCommand) {
+	if _, _, err := l.Apply(WithdrawRequest{Key: "w3", ID: "W1", User: "alice", Asset: btc, Amount: 1}); !errors.Is(err, ErrInvalidCommand) {
 		t.Fatalf("reused withdrawal id: %v", err)
 	}
 }
@@ -139,8 +139,50 @@ func TestDepositOverflowRejected(t *testing.T) {
 	l := New()
 	mustApply(t, l, Deposit{Key: "d1", User: "a", Asset: btc, Amount: 1 << 62})
 	mustApply(t, l, Deposit{Key: "d2", User: "b", Asset: btc, Amount: 1<<62 - 1})
-	if _, err := l.Apply(Deposit{Key: "d3", User: "c", Asset: btc, Amount: 2}); !errors.Is(err, ErrOverflow) {
+	if _, _, err := l.Apply(Deposit{Key: "d3", User: "c", Asset: btc, Amount: 2}); !errors.Is(err, ErrOverflow) {
 		t.Fatalf("expected overflow, got %v", err)
 	}
 	verify(t, l)
+}
+
+func TestIdempotentRetry(t *testing.T) {
+	l := New()
+	dep := Deposit{Key: "dep-1", User: "alice", Asset: btc, Amount: 100}
+	first := mustApply(t, l, dep)
+
+	again, replayed, err := l.Apply(dep)
+	if err != nil || !replayed {
+		t.Fatalf("retry: replayed=%v err=%v", replayed, err)
+	}
+	if again.Seq != first.Seq {
+		t.Fatalf("retry returned tx %d, want %d", again.Seq, first.Seq)
+	}
+	wantBalance(t, l, UserAccount("alice", btc, Available), 100)
+
+	_, _, err = l.Apply(Deposit{Key: "dep-1", User: "alice", Asset: btc, Amount: 999})
+	if !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("different payload: %v", err)
+	}
+	_, _, err = l.Apply(Hold{Key: "dep-1", User: "alice", Asset: btc, Amount: 100})
+	if !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("different command type: %v", err)
+	}
+	if _, _, err := l.Apply(Deposit{User: "alice", Asset: btc, Amount: 1}); !errors.Is(err, ErrInvalidCommand) {
+		t.Fatalf("empty key: %v", err)
+	}
+	wantBalance(t, l, UserAccount("alice", btc, Available), 100)
+	verify(t, l)
+}
+
+func TestRejectedCommandIsNotRecorded(t *testing.T) {
+	l := New()
+	hold := Hold{Key: "h1", User: "alice", Asset: btc, Amount: 50}
+	if _, _, err := l.Apply(hold); !errors.Is(err, ErrInsufficientFunds) {
+		t.Fatalf("expected insufficient funds, got %v", err)
+	}
+	mustApply(t, l, Deposit{Key: "d1", User: "alice", Asset: btc, Amount: 50})
+	if _, replayed, err := l.Apply(hold); err != nil || replayed {
+		t.Fatalf("retry after funding: replayed=%v err=%v", replayed, err)
+	}
+	wantBalance(t, l, UserAccount("alice", btc, Locked), 50)
 }
