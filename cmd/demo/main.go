@@ -1,7 +1,8 @@
 // Command demo runs a tiny exchange end to end with observability: a chain
 // deposit through the watcher, ledger deposits, crossing orders, settlement,
-// a cancel, the outbox and the invariant checker, with /metrics, /healthz and
-// /readyz served over HTTP and JSON logs correlated by trace id.
+// a cancel, the outbox and the invariant checker, with /metrics, /healthz,
+// /readyz and the /ws market data feed served over HTTP, a WebSocket client
+// subscribed to the market, and JSON logs correlated by trace id.
 package main
 
 import (
@@ -19,6 +20,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gwakko/cex-lab/internal/app"
@@ -27,6 +29,8 @@ import (
 	"github.com/gwakko/cex-lab/internal/custody/adapters/memcursor"
 	"github.com/gwakko/cex-lab/internal/events"
 	"github.com/gwakko/cex-lab/internal/ledger"
+	"github.com/gwakko/cex-lab/internal/marketdata"
+	"github.com/gwakko/cex-lab/internal/marketdata/adapters/ws"
 	"github.com/gwakko/cex-lab/internal/platform/outbox"
 	"github.com/gwakko/cex-lab/internal/platform/trace"
 	"github.com/gwakko/cex-lab/internal/trading"
@@ -61,7 +65,9 @@ func main() {
 	l, x := a.Ledger, a.Trading
 
 	base := serve(*addr, a.Handler())
-	fmt.Printf("serving %s/metrics, /healthz, /readyz\n", base)
+	fmt.Printf("serving %s/metrics, /healthz, /readyz, /ws\n", base)
+	feed := subscribe(base, "BTC-USDT")
+	defer feed.client.Close()
 
 	ctx := context.Background()
 	fmt.Println("\n== deposits")
@@ -121,6 +127,8 @@ func main() {
 	must(x.Check(ctx))
 	fmt.Println("ok: ledger balanced, no negatives, locked == resting reserves, book not crossed")
 
+	received := feed.wait(10, 2*time.Second) // before scraping, so delivery metrics are complete
+
 	fmt.Println("\n== HTTP")
 	for _, p := range []string{"/healthz", "/readyz"} {
 		code, body := fetch(base + p)
@@ -134,7 +142,20 @@ func main() {
 		"engine_book_depth", "engine_last_seq", "outbox_backlog", "inbox_duplicates_total",
 		"invariant_ok", "invariant_check_runs_total", "chain_deposits_credited_total", "chain_head_block",
 		"exchange_place_order_duration_seconds_count", "journal_fsync_duration_seconds_count",
+		"marketdata_connections", "marketdata_subscriptions", "marketdata_messages_sent_total",
+		"marketdata_publish_to_send_latency_seconds_count",
 	})
+
+	fmt.Println("\n== WebSocket /ws messages (book:BTC-USDT, trades:BTC-USDT)")
+	for _, m := range received {
+		fmt.Println("  " + m)
+	}
+	r := marketdata.NewBookReplica("BTC-USDT")
+	for _, e := range feed.envelopes() {
+		must(r.Apply(e))
+	}
+	bids, asks := r.Levels()
+	fmt.Printf("client book replica at seq %d: bids=%v asks=%v\n", r.Seq(), bids, asks)
 
 	fmt.Printf("\n== JSON logs for trace_id=%s (API -> engine -> ledger -> outbox)\n", followed)
 	printTrace(&logs, followed)
@@ -143,6 +164,58 @@ func main() {
 		fmt.Printf("\nserving for %s more; try: curl %s/metrics\n", *wait, base)
 		time.Sleep(*wait)
 	}
+}
+
+// feed collects market data messages received by a WebSocket client.
+type feed struct {
+	client *ws.Client
+	mu     sync.Mutex
+	raw    []string
+	decode []marketdata.Envelope
+}
+
+func subscribe(base, market string) *feed {
+	ctx := context.Background()
+	c, err := ws.Dial(ctx, "ws"+strings.TrimPrefix(base, "http")+"/ws")
+	must(err)
+	must(c.Subscribe(ctx, marketdata.BookChannel(market)))
+	must(c.Subscribe(ctx, marketdata.TradesChannel(market)))
+	f := &feed{client: c}
+	go func() {
+		for {
+			e, raw, err := c.Read(ctx)
+			if err != nil {
+				return
+			}
+			f.mu.Lock()
+			f.raw, f.decode = append(f.raw, string(raw)), append(f.decode, e)
+			f.mu.Unlock()
+		}
+	}()
+	return f
+}
+
+// wait returns the raw messages once n have arrived or timeout passes.
+func (f *feed) wait(n int, timeout time.Duration) []string {
+	deadline := time.Now().Add(timeout)
+	for {
+		f.mu.Lock()
+		got := len(f.raw)
+		f.mu.Unlock()
+		if got >= n || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.raw)
+}
+
+func (f *feed) envelopes() []marketdata.Envelope {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.decode)
 }
 
 func serve(addr string, h http.Handler) string {

@@ -10,7 +10,8 @@ and has not been audited. I built it to work through the hard parts of an
 exchange with code that tests can check. I have no production
 matching-engine or EVM experience; this repo is how I am learning them.
 
-Go standard library only, no third-party modules.
+Go standard library plus one third-party module, `github.com/coder/websocket`
+(the standard library has no WebSocket), confined to one adapter.
 
 ## Run
 
@@ -25,7 +26,7 @@ make bench       # metrics overhead benchmarks
 
 ## What is in it
 
-A modular monolith: three business modules with ports and adapters, shared
+A modular monolith: four business modules with ports and adapters, shared
 event contracts, platform infrastructure, and one composition root.
 
 | Package | What it does |
@@ -33,7 +34,8 @@ event contracts, platform infrastructure, and one composition root.
 | `internal/ledger` | Ledger module. Double-entry, append-only ledger: accounts per (user, asset, available/locked) plus system accounts (fees, external, withdrawals in flight); Deposit, Hold, Release, Settle (one trade, with fees and refund), Withdraw request/confirm/fail; idempotency keys; state rebuilt by replay; events stored with each transaction. Adapters: `adapters/filestore` (fsynced journal), `adapters/memstore`. |
 | `internal/trading` | Trading module. `internal/engine`: order book (limit and market orders, price-time priority, partial fills, cancel, tick/lot validation), one writer goroutine per market, command log written before applying, deterministic replay. `internal/service`: place = hold, match, settle each trade, release leftovers; cancel = release; `Check()` for cross-module invariants. Reaches funds only through `LedgerPort`. Adapters: `adapters/filelog`, `adapters/memlog`. |
 | `internal/custody` | Custody module. Deposit watcher with confirmations, reorg handling, idempotent crediting through `DepositCreditor`, and a persisted cursor. Adapters: `adapters/fakechain` (deterministic chain with reorgs), `adapters/filecursor`, `adapters/memcursor`. |
-| `internal/events` | Versioned event contract (`events.Event`) shared by producers and consumers. |
+| `internal/marketdata` | Market data module. Public `trades:<market>` and `book:<market>` channels: a top-N book snapshot, then incremental updates with a per-market sequence number; bounded per-client queues; a client-side `BookReplica` with gap detection. Built only from `internal/events`. Adapter: `adapters/ws` (WebSocket server and client, the only user of the WebSocket library). |
+| `internal/events` | Versioned event contracts (`events.Event`) shared by producers and consumers. |
 | `internal/platform/journal` | Append-only fsynced JSON-lines file used by the file adapters. |
 | `internal/platform/outbox` | Relay that drains events at least once, and a consumer inbox that deduplicates by event id. |
 | `internal/platform/telemetry` | Hand-written metrics registry, Prometheus text exposition, `/metrics`, `/healthz`, `/readyz`. |
@@ -51,12 +53,12 @@ event contracts, platform infrastructure, and one composition root.
                │
                ▼
           internal/app  ──────────────── composition root: knows everything
-          │    │     │  \
-          ▼    ▼     ▼   ▼ adapters (filestore, memstore, filelog, memlog,
-     ledger trading custody      fakechain, filecursor, memcursor)
-          │    │     │            │
-          │    │     │            └──► their own module's ports + platform
-          ▼    ▼     ▼
+          │    │     │     │  \
+          ▼    ▼     ▼     ▼   ▼ adapters (filestore, memstore, filelog, memlog,
+     ledger trading custody marketdata  fakechain, filecursor, memcursor, ws)
+          │    │     │     │          │
+          │    │     │     │          └──► their own module's ports + platform
+          ▼    ▼     ▼     ▼
    internal/events   internal/platform/trace
    (contracts)       (context id; the only platform package domain code uses)
 
@@ -66,8 +68,9 @@ event contracts, platform infrastructure, and one composition root.
 
 Rules (all enforced by `internal/archtest`):
 
-1. `ledger`, `trading` and `custody` never import each other, the
-   composition root or `cmd`. Trading does not import the ledger at all.
+1. `ledger`, `trading`, `custody` and `marketdata` never import each other,
+   the composition root or `cmd`. Trading does not import the ledger at all;
+   market data reaches `marketdata` only as `internal/events` values.
 2. Domain code (a module and its `internal/` packages) imports only the
    standard library (no `os`, `net`, `net/http`, `os/exec`), its own
    module, `internal/events` and `internal/platform/trace`.
@@ -78,6 +81,8 @@ Rules (all enforced by `internal/archtest`):
 5. A module root package declares exported identifiers only in `api.go` and
    `ports.go`. The implementation sits in the module's own `internal/`
    packages, which Go makes unimportable from outside the module.
+6. Third-party libraries are owned by one adapter: only
+   `internal/marketdata/adapters/ws` may import `github.com/coder/websocket`.
 
 ### How modules talk
 
@@ -90,7 +95,9 @@ Rules (all enforced by `internal/archtest`):
   classification interfaces (`InvariantName() string`).
 - **Events.** The ledger stores an `events.Event` with every transaction;
   `platform/outbox` relays them to any consumer, which only needs
-  `internal/events`.
+  `internal/events`. Trading publishes `events.TradeV1` and
+  `events.BookDeltaV1` to its `MarketDataSink` port; `internal/app` passes
+  the marketdata hub, whose `PublishTrade`/`PublishBookDelta` match it.
 - **Composition.** `app.New` builds ledger, trading and custody with file or
   in-memory adapters; `cmd/demo` only runs a scenario on top of it.
 
@@ -202,7 +209,7 @@ double credit.
 
 ## Tests
 
-77 test functions, 1 fuzz target (`FuzzExchange`) and 3 benchmarks; tests run with `-race`:
+97 test functions, 1 fuzz target (`FuzzExchange`) and 3 benchmarks; tests run with `-race`:
 
 - unit tests per package (ledger commands, idempotency, journal torn-write
   handling, matching rules, validation, cancel, fees, market orders, restart);
@@ -212,6 +219,13 @@ double credit.
 - `FuzzExchange`: the same simulation driven by fuzzer bytes;
 - `TestReplayIsDeterministic`: random command streams, then replay the log
   and compare trades, results and book;
+- market data tests (`internal/marketdata`, `internal/app`): protocol
+  validation, per-market sequencing, snapshot-then-incremental consistency
+  with late joiners over random delta streams, deltas from the engine
+  rebuilding the exact book over random commands, slow-consumer drop, gap
+  detection and resync, connection/frame/origin limits, ping, graceful
+  shutdown, and an end-to-end test with a real WebSocket client after a
+  restart from disk;
 - architecture tests (`internal/archtest`): dependency rules and module API
   placement, plus a self-test that the rules catch violations;
 - concurrency tests: many goroutines submitting to one engine, and many
@@ -280,6 +294,79 @@ price-improvement refund in settlement makes it fail with
 | Durability | fsync on every journal and command-log append; atomic temp-file + rename for the watcher cursor; torn-write handling |
 | Modular monolith | modules with consumer-defined ports, adapters, `internal/events`, composition root in `internal/app`, rules enforced by `internal/archtest` |
 | Observability | per-module `Metrics` ports with no-op defaults, `internal/app/instrument` adapters, Prometheus exposition, `log/slog` JSON logs with a trace id from API call to outbox event |
+
+## Market data
+
+`internal/marketdata` serves public market data at `GET /ws` (WebSocket,
+JSON text frames). It never sees user or order ids: it is built only from
+`events.TradeV1` and `events.BookDeltaV1`.
+
+### Protocol
+
+Client → server:
+
+```json
+{"op":"subscribe","channel":"book:BTC-USDT"}
+{"op":"subscribe","channel":"trades:BTC-USDT"}
+{"op":"unsubscribe","channel":"trades:BTC-USDT"}
+```
+
+Server → client (real output from `make demo`):
+
+```json
+{"type":"subscribed","channel":"book:BTC-USDT","market":"BTC-USDT"}
+{"type":"book_snapshot","channel":"book:BTC-USDT","market":"BTC-USDT"}
+{"type":"book_update","channel":"book:BTC-USDT","market":"BTC-USDT","seq":1,"asks":[[6000,2000000]]}
+{"type":"trade","channel":"trades:BTC-USDT","market":"BTC-USDT","seq":1,"price":6000,"qty":2000000,"taker_side":"buy","time":"..."}
+{"type":"book_update","channel":"book:BTC-USDT","market":"BTC-USDT","seq":3,"asks":[[6000,0],[6050,1500000]]}
+```
+
+Levels are `[price, qty]` in the same integer units as the engine; `qty` 0
+removes a level. Invalid requests (malformed JSON, unknown fields or ops,
+bad channel names, unknown markets, too many subscriptions) get an
+`{"type":"error",...}` message and the connection stays open.
+
+### Sequencing and resync
+
+- Trading reports, per command and in engine order, the price levels the
+  command changed. The hub applies them to a full replica and publishes only
+  changes to the **top-N view** (default 10 levels per side). Each
+  `book_update` carries the next per-market `seq`; levels that leave the view
+  are sent with qty 0 and levels that enter it with their quantity, so a
+  client that applies updates to the snapshot holds exactly the top N.
+- The ack and the snapshot are produced under the same lock as updates, so
+  the first update a subscriber sees is exactly `snapshot.seq + 1`.
+- A client that sees `seq != last + 1` has missed something. `BookReplica`
+  returns `ErrGap` and refuses updates until resynced; subscribing to the
+  same book channel again returns a fresh snapshot.
+- Trades have their own per-market `seq`. The taker's trace id is logged by
+  the hub ("marketdata trade published") but not published.
+- After a restart the hub is seeded from the books trading rebuilt from its
+  command logs, so the first snapshot is correct. Sequence numbers restart
+  at 0 with the process; clients resync on reconnect.
+
+### Backpressure and limits
+
+- Every session has a bounded send queue (default 256). Publishing never
+  blocks the engine goroutine: if a queue is full the session is dropped,
+  counted in `marketdata_dropped_slow_consumers_total`, and closed with
+  status 1008 "slow consumer".
+- Each write and each ping has a timeout (default 5 s); pings every 15 s.
+- Limits: max connections (default 1000, then HTTP 503), max subscriptions
+  per connection (16), max client frame size (4096 bytes, then close 1009),
+  same-origin only unless `OriginPatterns` is set.
+- Shutdown closes every session with 1001 "server shutdown" before the
+  engines stop.
+
+### Metrics
+
+`marketdata_connections`, `marketdata_subscriptions{channel}`,
+`marketdata_messages_sent_total{type}`,
+`marketdata_dropped_slow_consumers_total`,
+`marketdata_publish_to_send_latency_seconds` (from enqueue in the hub to a
+completed socket write). Alert on a rising drop rate (clients or network
+cannot keep up, or the publish rate jumped) and on p99 publish-to-send
+latency.
 
 ## Observability
 
@@ -379,7 +466,8 @@ this lab but would be contended under heavy parallel load.
 
 ## Limitations
 
-- No network API, WebSocket feed, authentication, rate limits or admin tools.
+- No trading API, authentication, rate limits or admin tools; the only
+  network surface is the read-only market data WebSocket and `/metrics`.
 - No real blockchain. `anvil`/`geth` were not available where this was built,
   so there is no real EVM adapter; the watcher runs only against the fake
   chain.
@@ -394,17 +482,17 @@ this lab but would be contended under heavy parallel load.
 
 ## What I would do next
 
-1. WebSocket market data (book deltas by sequence number, snapshot + replay
-   on reconnect).
-2. Postgres-backed ledger with the outbox and inbox tables in the same
+1. Postgres-backed ledger with the outbox and inbox tables in the same
    transaction as the entries.
-3. Engine snapshots plus log truncation; settle asynchronously from the
+2. Engine snapshots plus log truncation; settle asynchronously from the
    trade stream.
-4. A real EVM adapter (go-ethereum `ethclient`, ERC-20 `Transfer` logs)
+3. A real EVM adapter (go-ethereum `ethclient`, ERC-20 `Transfer` logs)
    behind a build tag, tested against a local anvil node.
-5. Signer isolation for withdrawals: a separate service with its own keys
+4. Signer isolation for withdrawals: a separate service with its own keys
    and limits, never in the exchange process.
-6. Self-trade prevention, order types (IOC, FOK, post-only), per-user limits.
-7. OpenTelemetry tracing (spans for place → match → settle → publish) and
+5. Self-trade prevention, order types (IOC, FOK, post-only), per-user limits.
+6. OpenTelemetry tracing (spans for place → match → settle → publish) and
    OTLP metric export; alert rules and dashboards as code.
+7. Market data: resumable streams (replay from a seq instead of a full
+   snapshot), per-IP limits, compression, private channels behind auth.
 8. External review of the ledger and settlement logic.
