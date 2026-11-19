@@ -17,24 +17,19 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"time"
 
-	"github.com/gwakko/cex-lab/instrument"
 	"github.com/gwakko/cex-lab/internal/app"
 	"github.com/gwakko/cex-lab/internal/custody"
 	"github.com/gwakko/cex-lab/internal/custody/adapters/fakechain"
 	"github.com/gwakko/cex-lab/internal/custody/adapters/memcursor"
 	"github.com/gwakko/cex-lab/internal/events"
 	"github.com/gwakko/cex-lab/internal/ledger"
-	"github.com/gwakko/cex-lab/internal/ledger/adapters/filestore"
 	"github.com/gwakko/cex-lab/internal/platform/outbox"
-	"github.com/gwakko/cex-lab/internal/platform/telemetry"
 	"github.com/gwakko/cex-lab/internal/platform/trace"
 	"github.com/gwakko/cex-lab/internal/trading"
-	"github.com/gwakko/cex-lab/internal/trading/adapters/filelog"
 )
 
 const (
@@ -53,39 +48,24 @@ func main() {
 	defer os.RemoveAll(dir)
 
 	var logs bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&logs, nil))
-	reg := telemetry.NewRegistry()
-	health := &telemetry.Health{}
+	a, err := app.New(app.Config{
+		DataDir: dir,
+		Logger:  slog.New(slog.NewJSONHandler(&logs, nil)),
+		Markets: []trading.MarketConfig{{
+			Symbol: "BTC-USDT", Base: btc, Quote: usdt,
+			Tick: 1, Lot: lot, MakerFeeBps: 10, TakerFeeBps: 20,
+		}},
+	})
+	must(err)
+	defer a.Close()
+	l, x := a.Ledger, a.Trading
 
-	store, err := filestore.Open(filepath.Join(dir, "ledger.journal"), instrument.NewJournal(reg, "ledger"))
-	must(err)
-	defer store.Close()
-	cmdLog, err := filelog.Open(filepath.Join(dir, "btc-usdt.cmdlog"), instrument.NewJournal(reg, "engine_BTC-USDT"))
-	must(err)
-	defer cmdLog.Close()
-
-	l, err := ledger.Open(store, ledger.WithMetrics(instrument.NewLedger(reg)), ledger.WithLogger(logger))
-	must(err)
-	x, err := trading.New(app.NewLedgerPort(l), []trading.MarketConfig{{
-		Symbol: "BTC-USDT", Base: btc, Quote: usdt,
-		Tick: 1, Lot: lot, MakerFeeBps: 10, TakerFeeBps: 20,
-		Log: cmdLog,
-	}},
-		trading.WithMetrics(instrument.NewExchange(reg)),
-		trading.WithLogger(logger),
-		trading.WithEngineMetrics(instrument.NewEngine(reg)))
-	must(err)
-	defer x.Close()
-
-	health.AddReadinessCheck("invariants", x.LastCheckError)
-	health.AddReadinessCheck("ledger_journal", store.Err)
-	health.AddReadinessCheck("engine_log_BTC-USDT", cmdLog.Err)
-	base := serve(*addr, telemetry.NewMux(reg, health))
+	base := serve(*addr, a.Handler())
 	fmt.Printf("serving %s/metrics, /healthz, /readyz\n", base)
 
 	ctx := context.Background()
 	fmt.Println("\n== deposits")
-	chainDeposit(ctx, l, reg, logger)
+	chainDeposit(ctx, a)
 	must2(l.Apply(ledger.Deposit{Key: "bank-1", User: "bob", Asset: usdt, Amount: 100_000_00}))
 	must2(l.Apply(ledger.Deposit{Key: "bank-1", User: "bob", Asset: usdt, Amount: 100_000_00})) // client retry
 	printBalances(l)
@@ -128,12 +108,12 @@ func main() {
 	printBalances(l)
 
 	fmt.Println("\n== outbox")
-	om := instrument.NewOutbox(reg)
 	seen := 0
-	inbox := outbox.NewInbox(func(events.Event) error { seen++; return nil }, outbox.WithMetrics(om))
-	n, err := outbox.NewRelay(l, inbox.Handle, 0, outbox.WithMetrics(om), outbox.WithLogger(logger)).Drain()
+	inbox := a.NewInbox(func(events.Event) error { seen++; return nil })
+	n, err := a.NewRelay(inbox.Handle, 0).Drain()
 	must(err)
-	_, err = outbox.NewRelay(l, inbox.Handle, 0, outbox.WithMetrics(om)).Drain() // redelivery after a "crash"
+	// Redelivery after a "crash": quiet logger so the trace below stays readable.
+	_, err = a.NewRelay(inbox.Handle, 0, outbox.WithLogger(slog.New(slog.DiscardHandler))).Drain()
 	must(err)
 	fmt.Printf("relayed %d events, redelivered all of them, consumer handled %d (deduplicated)\n", n, seen)
 
@@ -212,19 +192,13 @@ func printTrace(logs *bytes.Buffer, traceID string) {
 	}
 }
 
-// chainDeposit credits alice's BTC through the watcher on a fake custody.
-func chainDeposit(ctx context.Context, l *ledger.Ledger, reg *telemetry.Registry, logger *slog.Logger) {
+// chainDeposit credits alice's BTC through the custody watcher on a fake chain.
+func chainDeposit(ctx context.Context, a *app.App) {
 	fc := fakechain.New()
-	credit := func(ctx context.Context, d custody.Deposit) error {
-		_, _, err := l.ApplyContext(ctx, ledger.Deposit{Key: "chain:" + d.Key(), User: "alice", Asset: ledger.Asset(d.Asset), Amount: d.Amount})
-		return err
-	}
-	w, err := custody.NewWatcher(fc, &memcursor.Store{}, credit, custody.Config{
-		Confirmations: 3, Watched: []string{"addr-alice"}, StartBlock: 1,
-		Metrics: instrument.NewChain(reg), Logger: logger,
-	})
+	w, err := a.NewDepositWatcher(fc, &memcursor.Store{}, map[string]string{"addr-alice": "alice"},
+		custody.Config{Confirmations: 3, Watched: []string{"addr-alice"}, StartBlock: 1})
 	must(err)
-	fc.Mine(custody.Transfer{TxHash: "0xfeed", To: "addr-alice", Asset: string(btc), Amount: 100 * lot})
+	fc.Mine(custody.Transfer{TxHash: "0xfeed", To: "addr-alice", Asset: btc, Amount: 100 * lot})
 	for i := range 3 {
 		must(w.Poll(ctx))
 		fmt.Printf("block %d: pending=%d credited=%d\n", i+1, len(w.Pending()), len(w.Credited()))

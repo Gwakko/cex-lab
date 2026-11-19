@@ -1,9 +1,10 @@
-package instrument
+package instrument_test
 
 import (
 	"strconv"
 	"testing"
 
+	"github.com/gwakko/cex-lab/internal/app/instrument"
 	"github.com/gwakko/cex-lab/internal/ledger"
 	"github.com/gwakko/cex-lab/internal/ledger/adapters/memstore"
 	"github.com/gwakko/cex-lab/internal/platform/telemetry"
@@ -16,7 +17,7 @@ func BenchmarkLedgerApply(b *testing.B) {
 		opts []ledger.Option
 	}{
 		{"nop", nil},
-		{"instrumented", []ledger.Option{ledger.WithMetrics(NewLedger(telemetry.NewRegistry()))}},
+		{"instrumented", []ledger.Option{ledger.WithMetrics(instrument.NewLedger(telemetry.NewRegistry()))}},
 	} {
 		b.Run(bc.name, func(b *testing.B) {
 			l := memstore.NewLedger(bc.opts...)

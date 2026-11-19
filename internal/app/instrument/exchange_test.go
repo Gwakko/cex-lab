@@ -1,4 +1,4 @@
-package instrument
+package instrument_test
 
 import (
 	"bytes"
@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/gwakko/cex-lab/internal/app"
+	"github.com/gwakko/cex-lab/internal/app/instrument"
 	"github.com/gwakko/cex-lab/internal/events"
 	"github.com/gwakko/cex-lab/internal/ledger"
 	"github.com/gwakko/cex-lab/internal/ledger/adapters/filestore"
@@ -38,21 +39,21 @@ func newStack(t *testing.T) *stack {
 	s := &stack{reg: telemetry.NewRegistry(), logs: &bytes.Buffer{}, health: &telemetry.Health{}}
 	s.logger = slog.New(slog.NewJSONHandler(s.logs, nil))
 	var err error
-	s.store, err = filestore.Open(filepath.Join(t.TempDir(), "ledger.journal"), NewJournal(s.reg, "ledger"))
+	s.store, err = filestore.Open(filepath.Join(t.TempDir(), "ledger.journal"), instrument.NewJournal(s.reg, "ledger"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.store.Close() })
-	s.l, err = ledger.Open(s.store, ledger.WithMetrics(NewLedger(s.reg)), ledger.WithLogger(s.logger))
+	s.l, err = ledger.Open(s.store, ledger.WithMetrics(instrument.NewLedger(s.reg)), ledger.WithLogger(s.logger))
 	if err != nil {
 		t.Fatal(err)
 	}
 	s.x, err = trading.New(app.NewLedgerPort(s.l), []trading.MarketConfig{{
 		Symbol: market, Base: "BTC", Quote: "USDT", Tick: 1, Lot: 10, MakerFeeBps: 10, TakerFeeBps: 20, Log: &memlog.Log{},
 	}},
-		trading.WithMetrics(NewExchange(s.reg)),
+		trading.WithMetrics(instrument.NewExchange(s.reg)),
 		trading.WithLogger(s.logger),
-		trading.WithEngineMetrics(NewEngine(s.reg)))
+		trading.WithEngineMetrics(instrument.NewEngine(s.reg)))
 	if err != nil {
 		t.Fatal(err)
 	}

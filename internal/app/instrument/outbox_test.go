@@ -1,4 +1,4 @@
-package instrument
+package instrument_test
 
 import (
 	"errors"
@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gwakko/cex-lab/internal/app/instrument"
 	"github.com/gwakko/cex-lab/internal/events"
 	"github.com/gwakko/cex-lab/internal/ledger"
 	"github.com/gwakko/cex-lab/internal/ledger/adapters/memstore"
@@ -15,7 +16,7 @@ import (
 
 func TestOutboxMetrics(t *testing.T) {
 	reg := telemetry.NewRegistry()
-	m := NewOutbox(reg)
+	m := instrument.NewOutbox(reg)
 	l := memstore.NewLedger()
 	for i := range 4 {
 		l.Apply(ledger.Deposit{Key: fmt.Sprint(i), User: "a", Asset: "BTC", Amount: 1})

@@ -1,4 +1,4 @@
-package instrument
+package instrument_test
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gwakko/cex-lab/internal/app/instrument"
 	"github.com/gwakko/cex-lab/internal/custody"
 	"github.com/gwakko/cex-lab/internal/custody/adapters/fakechain"
 	"github.com/gwakko/cex-lab/internal/custody/adapters/memcursor"
@@ -21,7 +22,7 @@ func newWatcher(t *testing.T, reg *telemetry.Registry, fc *fakechain.Chain, l *l
 		return err
 	}
 	w, err := custody.NewWatcher(fc, &memcursor.Store{}, credit, custody.Config{
-		Confirmations: confirmations, Watched: []string{"addr"}, StartBlock: 1, Metrics: NewChain(reg),
+		Confirmations: confirmations, Watched: []string{"addr"}, StartBlock: 1, Metrics: instrument.NewChain(reg),
 	})
 	if err != nil {
 		t.Fatal(err)
