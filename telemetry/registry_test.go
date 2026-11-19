@@ -3,6 +3,7 @@ package telemetry
 import (
 	"bufio"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -231,5 +232,16 @@ func BenchmarkHistogramObserve(b *testing.B) {
 	h := NewRegistry().Histogram("bench_seconds", "", LatencyBuckets, "market")
 	for b.Loop() {
 		h.Observe(0.0003, "BTC-USDT")
+	}
+}
+
+func TestFormatFloat(t *testing.T) {
+	for v, want := range map[float64]string{
+		3_500_000: "3500000", 0: "0", -2: "-2", 0.25: "0.25", 1e300: "1e+300",
+		math.Inf(1): "+Inf", math.Inf(-1): "-Inf", math.NaN(): "NaN",
+	} {
+		if got := formatFloat(v); got != want {
+			t.Errorf("formatFloat(%v) = %q, want %q", v, got, want)
+		}
 	}
 }

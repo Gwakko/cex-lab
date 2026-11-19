@@ -257,6 +257,8 @@ func formatFloat(v float64) string {
 		return "-Inf"
 	case math.IsNaN(v):
 		return "NaN"
+	case v == math.Trunc(v) && math.Abs(v) < 1<<53:
+		return strconv.FormatInt(int64(v), 10) // exact integers read better than 3.5e+06
 	}
 	return strconv.FormatFloat(v, 'g', -1, 64)
 }
