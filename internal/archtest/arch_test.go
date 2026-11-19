@@ -20,7 +20,7 @@ const module = "github.com/gwakko/cex-lab"
 // modules are the business modules. Each lives in internal/<name>, may have
 // adapters under internal/<name>/adapters and private code under
 // internal/<name>/internal.
-var modules = []string{"ledger", "trading", "custody"}
+var modules = []string{"ledger", "trading", "custody", "marketdata"}
 
 // forbiddenInDomain are standard packages domain code must not use: I/O and
 // networking belong in adapters or the composition root.
@@ -275,6 +275,9 @@ func TestRulesCatchViolations(t *testing.T) {
 		{"module imports app", p("internal/custody/internal/watch", "internal/app/instrument"), "composition root"},
 		{"events imports a module", p("internal/events", "internal/ledger"), "shared contract"},
 		{"platform imports a module", p("internal/platform/outbox", "internal/ledger"), "platform code must not depend"},
+		{"marketdata imports trading", p("internal/marketdata/internal/hub", "internal/trading"), "must not import module trading"},
+		{"trading imports marketdata", p("internal/trading/internal/service", "internal/marketdata"), "must not import module marketdata"},
+		{"marketdata domain uses net/http", p("internal/marketdata/internal/hub", "net/http"), "must not do I/O"},
 	}
 	for _, tc := range cases {
 		vs := importViolations([]pkg{tc.pkg})
