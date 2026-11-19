@@ -1,11 +1,12 @@
 // Package app is the composition root. It is the only place that knows every
-// module and every adapter: it builds the ledger, trading and custody
-// modules, picks file or in-memory adapters, connects trading and custody to
+// module and every adapter: it builds the ledger, trading, custody and
+// marketdata modules, picks file or in-memory adapters, connects trading and custody to
 // the ledger through their ports, and attaches metrics, logs and health
 // checks. Modules never import it.
 package app
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -14,9 +15,12 @@ import (
 
 	"github.com/gwakko/cex-lab/internal/app/instrument"
 	"github.com/gwakko/cex-lab/internal/custody"
+	"github.com/gwakko/cex-lab/internal/events"
 	"github.com/gwakko/cex-lab/internal/ledger"
 	"github.com/gwakko/cex-lab/internal/ledger/adapters/filestore"
 	"github.com/gwakko/cex-lab/internal/ledger/adapters/memstore"
+	"github.com/gwakko/cex-lab/internal/marketdata"
+	"github.com/gwakko/cex-lab/internal/marketdata/adapters/ws"
 	"github.com/gwakko/cex-lab/internal/platform/outbox"
 	"github.com/gwakko/cex-lab/internal/platform/telemetry"
 	"github.com/gwakko/cex-lab/internal/trading"
@@ -37,10 +41,11 @@ type Config struct {
 
 // App is the wired system.
 type App struct {
-	Ledger   *ledger.Ledger
-	Trading  *trading.Service
-	Registry *telemetry.Registry
-	Health   *telemetry.Health
+	Ledger     *ledger.Ledger
+	Trading    *trading.Service
+	MarketData *marketdata.Hub
+	Registry   *telemetry.Registry
+	Health     *telemetry.Health
 
 	logger  *slog.Logger
 	outbox  *instrument.Outbox
@@ -79,11 +84,22 @@ func New(cfg Config) (_ *App, err error) {
 		}
 		markets[i] = m
 	}
+	symbols := make([]string, len(markets))
+	for i, m := range markets {
+		symbols[i] = m.Symbol
+	}
+	a.MarketData = marketdata.New(marketdata.Config{Markets: symbols},
+		marketdata.WithMetrics(instrument.NewMarketData(a.Registry)), marketdata.WithLogger(a.logger))
+
 	a.Trading, err = trading.New(NewLedgerPort(a.Ledger), markets,
 		trading.WithMetrics(instrument.NewExchange(a.Registry)),
 		trading.WithEngineMetrics(instrument.NewEngine(a.Registry)),
+		trading.WithMarketData(a.MarketData),
 		trading.WithLogger(a.logger))
 	if err != nil {
+		return nil, err
+	}
+	if err := a.seedMarketData(symbols); err != nil {
 		return nil, err
 	}
 	a.Health.AddReadinessCheck("invariants", a.Trading.LastCheckError)
@@ -117,6 +133,32 @@ func (a *App) commandLog(dir, symbol string) (trading.CommandLog, error) {
 	return fl, nil
 }
 
+// seedMarketData copies the books trading recovered from its command logs
+// into the market data hub before any client connects.
+func (a *App) seedMarketData(symbols []string) error {
+	for _, s := range symbols {
+		book, err := a.Trading.Book(context.Background(), s)
+		if err != nil {
+			return err
+		}
+		a.MarketData.Seed(s, aggregate(book.Bids), aggregate(book.Asks))
+	}
+	return nil
+}
+
+// aggregate sums resting quantity per price, keeping book order.
+func aggregate(orders []trading.Order) []events.Level {
+	var out []events.Level
+	for _, o := range orders {
+		if n := len(out); n > 0 && out[n-1].Price == o.Price {
+			out[n-1].Qty += o.Remaining
+			continue
+		}
+		out = append(out, events.Level{Price: o.Price, Qty: o.Remaining})
+	}
+	return out
+}
+
 // NewDepositWatcher builds a custody watcher that credits the ledger.
 // owners maps each watched address to its user; cfg.Metrics and cfg.Logger
 // are set by the app.
@@ -138,11 +180,20 @@ func (a *App) NewInbox(h outbox.Handler, opts ...outbox.Option) *outbox.Inbox {
 	return outbox.NewInbox(h, append([]outbox.Option{outbox.WithMetrics(a.outbox)}, opts...)...)
 }
 
-// Handler serves /metrics, /healthz and /readyz.
-func (a *App) Handler() http.Handler { return telemetry.NewMux(a.Registry, a.Health) }
+// Handler serves /metrics, /healthz, /readyz and the market data WebSocket
+// at /ws.
+func (a *App) Handler() http.Handler {
+	mux := telemetry.NewMux(a.Registry, a.Health)
+	mux.Handle("GET /ws", ws.NewHandler(a.MarketData, ws.Config{Logger: a.logger}))
+	return mux
+}
 
-// Close stops the engines and closes the files.
+// Close disconnects market data clients, stops the engines and closes the
+// files.
 func (a *App) Close() error {
+	if a.MarketData != nil {
+		a.MarketData.Close()
+	}
 	if a.Trading != nil {
 		a.Trading.Close()
 	}
