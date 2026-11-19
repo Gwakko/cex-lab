@@ -1,4 +1,4 @@
-.PHONY: check vet test fuzz demo
+.PHONY: check vet test fuzz bench demo demo-serve
 
 check: vet test
 
@@ -12,5 +12,11 @@ test:
 fuzz:
 	go test -run '^$$' -fuzz FuzzExchange -fuzztime 30s ./exchange/
 
+bench:
+	go test -run '^$$' -bench . ./telemetry/ ./instrument/
+
 demo:
 	go run ./cmd/demo
+
+demo-serve:
+	go run ./cmd/demo -addr 127.0.0.1:9090 -wait 60s
