@@ -15,9 +15,11 @@ Go standard library only, no third-party modules.
 ## Run
 
 ```sh
-make check   # gofmt, go vet, go test -race ./...
-make demo    # go run ./cmd/demo
-make fuzz    # 30s of go test -fuzz on random command sequences
+make check       # gofmt, go vet, go test -race ./...
+make demo        # go run ./cmd/demo (serves /metrics on 127.0.0.1:<random port>)
+make demo-serve  # same on 127.0.0.1:9090 and keeps serving 60s for curl
+make fuzz        # 30s of go test -fuzz on random command sequences
+make bench       # metrics overhead benchmarks
 ```
 
 ## What is in it
@@ -30,6 +32,9 @@ make fuzz    # 30s of go test -fuzz on random command sequences
 | `exchange` | Glue: place = hold, match, settle each trade, release leftovers. Cancel = release. `Check()` asserts cross-component invariants. |
 | `chain` | `Client` interface, a deterministic fake chain with reorgs, and a deposit watcher with confirmations, reorg handling, idempotent crediting and a persisted cursor. |
 | `internal/journal` | Append-only fsynced JSON-lines file, shared by the ledger journal and the engine command log. |
+| `telemetry` | Hand-written metrics registry (counter, gauge, histogram, labels), Prometheus text exposition, `/metrics`, `/healthz`, `/readyz`. |
+| `telemetry/trace` | Trace id carried in `context.Context`. |
+| `instrument` | Adapters from each package's `Metrics` interface to the registry. |
 | `cmd/demo` | Runs the whole path once and prints trades, balances and the invariant check. |
 
 ## Architecture
@@ -106,7 +111,7 @@ double credit.
 
 ## Tests
 
-47 test functions plus 1 fuzz target (`FuzzExchange`), all run with `-race`:
+66 test functions, 1 fuzz target (`FuzzExchange`) and 3 benchmarks; tests run with `-race`:
 
 - unit tests per package (ledger commands, idempotency, journal torn-write
   handling, matching rules, validation, cancel, fees, market orders, restart);
@@ -117,7 +122,16 @@ double credit.
 - `TestReplayIsDeterministic`: random command streams, then replay the log
   and compare trades, results and book;
 - concurrency tests: many goroutines submitting to one engine, and many
-  goroutines trading on the exchange, then invariants and replay.
+  goroutines trading on the exchange, then invariants and replay;
+- observability tests (`telemetry/`, `instrument/`): the Prometheus output is
+  parsed back (HELP/TYPE, escaping, cumulative buckets, `+Inf`, `_sum`,
+  `_count`), concurrent updates under `-race`, `/metrics` `/healthz` `/readyz`
+  via `httptest`, and scenarios that assert exact metric values (one client
+  retry → exactly one `idempotent_replay`; a rejected order →
+  `rejected{reason}`; a reorg → `chain_reorgs_total` and depth histogram; an
+  injected invariant violation → `invariant_ok 0`, a violation count and a
+  503 from `/readyz`; one trace id visible in exchange, engine, ledger and
+  outbox logs).
 
 I also checked that the property test catches a real bug: dropping the
 price-improvement refund in settlement makes it fail with
@@ -171,6 +185,102 @@ price-improvement refund in settlement makes it fail with
 | Event sourcing | engine command log is the source of truth for the book; ledger journal is the source of truth for balances; both rebuilt by replay |
 | Event-driven | ledger events relayed to consumers at least once |
 | Durability | fsync on every journal and command-log append; atomic temp-file + rename for the watcher cursor; torn-write handling |
+| Observability | per-package `Metrics` interfaces with no-op defaults, `instrument/` adapters, Prometheus exposition, `log/slog` JSON logs with a trace id from API call to outbox event |
+
+## Observability
+
+Every package that does work (`ledger`, `internal/journal`, `engine`,
+`exchange`, `outbox`, `chain`) defines a small `Metrics` interface and takes
+it as an option, defaulting to a no-op. There is no global registry, so tests
+stay isolated. `instrument/` maps those interfaces onto a
+`telemetry.Registry`. Loggers are injected the same way (`*slog.Logger`,
+discard by default; JSON in the demo).
+
+### Metrics
+
+| Area | Metrics |
+|---|---|
+| exchange | `exchange_orders_placed_total{market,side,type}`, `exchange_orders_rejected_total{market,reason}`, `exchange_orders_cancelled_total{market}`, `exchange_trades_total{market}`, `exchange_trade_volume_total{market,asset}` (minimal units), `exchange_order_to_trade_latency_seconds{market}` (order received → first fill returned by the engine), `exchange_place_order_duration_seconds{market}` |
+| engine | `engine_command_queue_depth{market}`, `engine_commands_applied_total{market,type}`, `engine_match_duration_seconds{market}`, `engine_book_depth{market,side}` (price levels), `engine_last_seq{market}` |
+| ledger | `ledger_commands_total{type,result}` with result `applied`, `idempotent_replay`, `rejected` or `error`; `ledger_idempotency_conflicts_total`, `ledger_entries_written_total` |
+| journal | `journal_fsync_duration_seconds{journal}`, `journal_bytes{journal}`, `journal_truncated_records_total{journal}` (torn records dropped on recovery) |
+| outbox | `outbox_backlog`, `outbox_oldest_age_seconds`, `outbox_relay_publish_total{result}`, `inbox_duplicates_total` |
+| invariants | `invariant_check_runs_total`, `invariant_violations_total{invariant}`, `last_invariant_check_timestamp_seconds`, `invariant_ok` |
+| chain | `chain_head_block`, `chain_confirmed_block`, `chain_watcher_lag_blocks`, `chain_deposits_credited_total{asset}`, `chain_deposits_pending`, `chain_reorgs_total`, `chain_reorg_depth_blocks`, `chain_reorg_below_confirmation_threshold_total`, `chain_duplicate_deliveries_total` |
+
+Invariant names come from `ledger.InvariantError`: `entries_sum_zero`,
+`balance_matches_entries`, `non_negative_balance`,
+`in_flight_matches_pending`, `book_not_crossed`, `locked_equals_reserves`.
+
+Cardinality rules: labels are only market, side, order type, asset, command
+type, result, reject reason (a fixed list), invariant name and journal name.
+User ids, order ids, tx hashes and idempotency keys go to logs, never to
+labels. An unknown market symbol is counted as `market="unknown"` so a
+client cannot create series.
+
+### What I would alert on
+
+| Signal | Why |
+|---|---|
+| `increase(invariant_violations_total[5m]) > 0` or `invariant_ok == 0` | Balances and the book disagree. Page immediately and stop trading (the node also goes unready). |
+| `increase(chain_reorg_below_confirmation_threshold_total[1h]) > 0` | Funds were credited on blocks that no longer exist. Page; the watcher halts by design. |
+| `time() - last_invariant_check_timestamp_seconds` too large | The checker itself stopped, so the first alert would not fire. |
+| `outbox_backlog` or `outbox_oldest_age_seconds` growing | Commits succeed but consumers (notifications, risk, market data) do not see them. |
+| `engine_command_queue_depth` growing while `rate(engine_commands_applied_total)` is flat | The market's single writer is stuck or too slow. |
+| p99 of `journal_fsync_duration_seconds` | Disk latency is the floor for every order and every ledger write. |
+| spike in `ledger_idempotency_conflicts_total` | A client or internal caller reuses keys for different payloads, which is a bug. |
+| `chain_watcher_lag_blocks` above a few blocks, or `chain_deposits_pending` growing | Deposits are slow or the node is unhealthy. |
+| `rate(exchange_orders_rejected_total{reason="internal"})` > 0 | Errors that are not user mistakes. |
+
+### Dashboards I would build
+
+1. Trading: orders placed/rejected by reason, trades and volume per market,
+   p50/p99 place and order-to-trade latency, book depth.
+2. Engine health: queue depth, applied commands rate, match latency, last seq
+   per market (a flat line on a busy market is a stuck writer).
+3. Ledger and durability: command results stacked by type, replay and
+   conflict rates, fsync latency heatmap, journal size.
+4. Money safety: `invariant_ok`, violations by invariant, time since last
+   check, outbox backlog and age.
+5. Deposits: head vs confirmed block, watcher lag, pending deposits, reorgs
+   and depth histogram, credits per asset.
+
+### Logs and trace correlation
+
+`exchange.Place` takes the trace id from the context or creates one
+(`telemetry/trace`). It travels in `engine.Command.TraceID` (written to the
+command log, never used by matching), in `ledger.Tx.TraceID`, and in
+`ledger.Event.TraceID`, so the outbox relay logs it too. The demo prints the
+JSON lines of one order: hold → engine command → two settlements → order
+placed → three outbox events, all with the same `trace_id`. Log fields
+include `market`, `seq`, `order_id`, `user_id`, `idempotency_key`,
+`event_id`, `tx_key`. There are no secrets in this project to leak; logs
+carry no keys or credentials.
+
+### Readiness
+
+`/healthz` answers 200 while the process serves HTTP. `/readyz` answers 503
+if the last invariant check failed or the last journal or command-log
+append failed (`FileStore.Err`, `FileLog.Err`). It reports the most recent
+results; it does not probe the disk itself.
+
+### Overhead
+
+`make bench` on my machine: `Counter.Inc` about 60 ns, `Histogram.Observe`
+about 25 ns; `ledger.Apply` was about 1.4 µs/op with the no-op recorder and
+about the same with the real one (the difference was inside run-to-run
+noise). Each update takes a per-family mutex, which is simple and fine for
+this lab but would be contended under heavy parallel load.
+
+### Not done
+
+- No OpenTelemetry: no OTel SDK, no OTLP exporter, no spans. The trace id is
+  a log-correlation id only. OTel tracing and metrics export is the next step.
+- I did not run Prometheus or Grafana against it. The exposition format is
+  checked by tests that parse it, not by a real scraper.
+- Metric values are float64 like Prometheus, so volume counters lose
+  precision above 2^53 minimal units.
+- No alert rules or dashboards are committed; the lists above are design.
 
 ## Limitations
 
@@ -183,6 +293,8 @@ price-improvement refund in settlement makes it fail with
 - In-memory plus local files only; no database, replication or failover.
 - No snapshots, so recovery time grows with the log.
 - Self-trade is not prevented.
+- Observability is in-process only: no OpenTelemetry, and no real
+  Prometheus/Grafana has been run against it.
 - Not audited, not load-tested, not reviewed by anyone else.
 
 ## What I would do next
@@ -198,4 +310,6 @@ price-improvement refund in settlement makes it fail with
 5. Signer isolation for withdrawals: a separate service with its own keys
    and limits, never in the exchange process.
 6. Self-trade prevention, order types (IOC, FOK, post-only), per-user limits.
-7. External review of the ledger and settlement logic.
+7. OpenTelemetry tracing (spans for place → match → settle → publish) and
+   OTLP metric export; alert rules and dashboards as code.
+8. External review of the ledger and settlement logic.
