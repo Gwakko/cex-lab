@@ -7,8 +7,8 @@ import (
 	"testing"
 
 	"github.com/gwakko/cex-lab/chain"
+	"github.com/gwakko/cex-lab/internal/platform/telemetry"
 	"github.com/gwakko/cex-lab/ledger"
-	"github.com/gwakko/cex-lab/telemetry"
 )
 
 func newWatcher(t *testing.T, reg *telemetry.Registry, fc *chain.FakeChain, l *ledger.Ledger, confirmations uint64) *chain.Watcher {

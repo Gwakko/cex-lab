@@ -3,7 +3,7 @@ package ledger
 import (
 	"sync"
 
-	"github.com/gwakko/cex-lab/internal/journal"
+	"github.com/gwakko/cex-lab/internal/platform/journal"
 )
 
 // Store persists committed transactions in order. Append must be durable

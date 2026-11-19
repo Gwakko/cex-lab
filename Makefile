@@ -13,7 +13,7 @@ fuzz:
 	go test -run '^$$' -fuzz FuzzExchange -fuzztime 30s ./exchange/
 
 bench:
-	go test -run '^$$' -bench . ./telemetry/ ./instrument/
+	go test -run '^$$' -bench . ./internal/platform/telemetry/ ./instrument/
 
 demo:
 	go run ./cmd/demo

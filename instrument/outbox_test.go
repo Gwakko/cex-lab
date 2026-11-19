@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"github.com/gwakko/cex-lab/internal/events"
+	"github.com/gwakko/cex-lab/internal/platform/telemetry"
 	"github.com/gwakko/cex-lab/ledger"
 	"github.com/gwakko/cex-lab/outbox"
-	"github.com/gwakko/cex-lab/telemetry"
 )
 
 func TestOutboxMetrics(t *testing.T) {

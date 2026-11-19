@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/gwakko/cex-lab/internal/events"
-	"github.com/gwakko/cex-lab/telemetry/trace"
+	"github.com/gwakko/cex-lab/internal/platform/trace"
 )
 
 // ErrIdempotencyConflict means a key was reused for a different command.

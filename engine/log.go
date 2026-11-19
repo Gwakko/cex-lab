@@ -4,7 +4,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/gwakko/cex-lab/internal/journal"
+	"github.com/gwakko/cex-lab/internal/platform/journal"
 )
 
 // Log is the ordered command log. A command is appended before it is applied,

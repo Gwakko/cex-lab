@@ -9,7 +9,7 @@ import (
 	"maps"
 	"slices"
 
-	"github.com/gwakko/cex-lab/telemetry/trace"
+	"github.com/gwakko/cex-lab/internal/platform/trace"
 )
 
 var (

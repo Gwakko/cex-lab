@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/gwakko/cex-lab/engine"
-	"github.com/gwakko/cex-lab/telemetry"
+	"github.com/gwakko/cex-lab/internal/platform/telemetry"
 )
 
 var spec = engine.MarketSpec{Symbol: "BTC-USDT", Tick: 1, Lot: 1}

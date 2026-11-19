@@ -6,7 +6,7 @@ package instrument
 import (
 	"time"
 
-	"github.com/gwakko/cex-lab/telemetry"
+	"github.com/gwakko/cex-lab/internal/platform/telemetry"
 )
 
 // Ledger implements ledger.Metrics.

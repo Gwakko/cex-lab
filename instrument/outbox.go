@@ -3,7 +3,7 @@ package instrument
 import (
 	"time"
 
-	"github.com/gwakko/cex-lab/telemetry"
+	"github.com/gwakko/cex-lab/internal/platform/telemetry"
 )
 
 // Outbox implements outbox.Metrics.

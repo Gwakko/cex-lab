@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/gwakko/cex-lab/engine"
+	"github.com/gwakko/cex-lab/internal/platform/trace"
 	"github.com/gwakko/cex-lab/ledger"
-	"github.com/gwakko/cex-lab/telemetry/trace"
 )
 
 var ErrUnknownMarket = errors.New("exchange: unknown market")

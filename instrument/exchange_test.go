@@ -13,10 +13,10 @@ import (
 	"github.com/gwakko/cex-lab/engine"
 	"github.com/gwakko/cex-lab/exchange"
 	"github.com/gwakko/cex-lab/internal/events"
+	"github.com/gwakko/cex-lab/internal/platform/telemetry"
+	"github.com/gwakko/cex-lab/internal/platform/trace"
 	"github.com/gwakko/cex-lab/ledger"
 	"github.com/gwakko/cex-lab/outbox"
-	"github.com/gwakko/cex-lab/telemetry"
-	"github.com/gwakko/cex-lab/telemetry/trace"
 )
 
 const market = "BTC-USDT"

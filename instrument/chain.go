@@ -1,6 +1,6 @@
 package instrument
 
-import "github.com/gwakko/cex-lab/telemetry"
+import "github.com/gwakko/cex-lab/internal/platform/telemetry"
 
 // Chain implements chain.Metrics.
 type Chain struct {

@@ -4,8 +4,8 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/gwakko/cex-lab/internal/platform/telemetry"
 	"github.com/gwakko/cex-lab/ledger"
-	"github.com/gwakko/cex-lab/telemetry"
 )
 
 // BenchmarkLedgerApply compares the no-op recorder with the real registry.
