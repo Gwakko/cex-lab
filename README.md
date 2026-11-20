@@ -5,13 +5,15 @@ a double-entry ledger, a spot matching engine, the glue between them, and a
 deposit watcher that copes with chain reorganisations.
 
 **This is a learning project, not production software.** It moves no real
-funds, talks to no real blockchain, has no network layer or authentication,
-and has not been audited. I built it to work through the hard parts of an
+funds and has no trading API or authentication. The EVM deposit adapter has
+been verified only against a local anvil devnet, never against a public
+network. Nothing has been audited. I built it to work through the hard parts of an
 exchange with code that tests can check. I have no production
 matching-engine or EVM experience; this repo is how I am learning them.
 
-Go standard library plus one third-party module, `github.com/coder/websocket`
-(the standard library has no WebSocket), confined to one adapter.
+Go standard library plus two third-party modules, each confined to one
+adapter: `github.com/coder/websocket` (the standard library has no
+WebSocket) and `github.com/ethereum/go-ethereum` (EVM JSON-RPC client).
 
 ## Run
 
@@ -22,6 +24,8 @@ make demo        # go run ./cmd/demo (serves /metrics on 127.0.0.1:<random port>
 make demo-serve  # same on 127.0.0.1:9090 and keeps serving 60s for curl
 make fuzz        # 30s of go test -fuzz on random command sequences
 make bench       # metrics overhead benchmarks
+make evm-test    # EVM adapter against a real local anvil (needs Foundry)
+make evm-demo    # watcher + ledger against a fresh anvil, with a real reorg
 ```
 
 ## What is in it
@@ -33,9 +37,10 @@ event contracts, platform infrastructure, and one composition root.
 |---|---|
 | `internal/ledger` | Ledger module. Double-entry, append-only ledger: accounts per (user, asset, available/locked) plus system accounts (fees, external, withdrawals in flight); Deposit, Hold, Release, Settle (one trade, with fees and refund), Withdraw request/confirm/fail; idempotency keys; state rebuilt by replay; events stored with each transaction. Adapters: `adapters/filestore` (fsynced journal), `adapters/memstore`. |
 | `internal/trading` | Trading module. `internal/engine`: order book (limit and market orders, price-time priority, partial fills, cancel, tick/lot validation), one writer goroutine per market, command log written before applying, deterministic replay. `internal/service`: place = hold, match, settle each trade, release leftovers; cancel = release; `Check()` for cross-module invariants. Reaches funds only through `LedgerPort`. Adapters: `adapters/filelog`, `adapters/memlog`. |
-| `internal/custody` | Custody module. Deposit watcher with confirmations, reorg handling, idempotent crediting through `DepositCreditor`, and a persisted cursor. Adapters: `adapters/fakechain` (deterministic chain with reorgs), `adapters/filecursor`, `adapters/memcursor`. |
+| `internal/custody` | Custody module. Deposit watcher with confirmations, reorg handling, idempotent crediting through `DepositCreditor`, and a persisted cursor. Adapters: `adapters/evmchain` (EVM node via go-ethereum: native ETH and ERC-20 deposits), `adapters/fakechain` (deterministic chain with reorgs), `adapters/filecursor`, `adapters/memcursor`. |
 | `internal/marketdata` | Market data module. Public `trades:<market>` and `book:<market>` channels: a top-N book snapshot, then incremental updates with a per-market sequence number; bounded per-client queues; a client-side `BookReplica` with gap detection. Built only from `internal/events`. Adapter: `adapters/ws` (WebSocket server and client, the only user of the WebSocket library). |
 | `internal/events` | Versioned event contracts (`events.Event`) shared by producers and consumers. |
+| `internal/platform/devnet` | Starts a throwaway local anvil and drives it with cast and JSON-RPC, for `evm` tests and `cmd/evmdemo`. |
 | `internal/platform/journal` | Append-only fsynced JSON-lines file used by the file adapters. |
 | `internal/platform/outbox` | Relay that drains events at least once, and a consumer inbox that deduplicates by event id. |
 | `internal/platform/telemetry` | Hand-written metrics registry, Prometheus text exposition, `/metrics`, `/healthz`, `/readyz`. |
@@ -55,7 +60,7 @@ event contracts, platform infrastructure, and one composition root.
           internal/app  ──────────────── composition root: knows everything
           │    │     │     │  \
           ▼    ▼     ▼     ▼   ▼ adapters (filestore, memstore, filelog, memlog,
-     ledger trading custody marketdata  fakechain, filecursor, memcursor, ws)
+     ledger trading custody marketdata  fakechain, evmchain, filecursor, memcursor, ws)
           │    │     │     │          │
           │    │     │     │          └──► their own module's ports + platform
           ▼    ▼     ▼     ▼
@@ -82,7 +87,9 @@ Rules (all enforced by `internal/archtest`):
    `ports.go`. The implementation sits in the module's own `internal/`
    packages, which Go makes unimportable from outside the module.
 6. Third-party libraries are owned by one adapter: only
-   `internal/marketdata/adapters/ws` may import `github.com/coder/websocket`.
+   `internal/marketdata/adapters/ws` may import `github.com/coder/websocket`,
+   and only `internal/custody/adapters/evmchain` may import
+   `github.com/ethereum/go-ethereum`.
 
 ### How modules talk
 
@@ -137,7 +144,7 @@ wiring.
 ### Runtime flow
 
 ```
-            custody.ChainClient (fakechain adapter)
+            custody.ChainClient (evmchain adapter, or fakechain in tests)
                      │ blocks, transfers
                      ▼
               custody.Watcher ── N confirmations, reorg detection,
@@ -294,6 +301,69 @@ price-improvement refund in settlement makes it fail with
 | Durability | fsync on every journal and command-log append; atomic temp-file + rename for the watcher cursor; torn-write handling |
 | Modular monolith | modules with consumer-defined ports, adapters, `internal/events`, composition root in `internal/app`, rules enforced by `internal/archtest` |
 | Observability | per-module `Metrics` ports with no-op defaults, `internal/app/instrument` adapters, Prometheus exposition, `log/slog` JSON logs with a trace id from API call to outbox event |
+
+## EVM deposit adapter
+
+`internal/custody/adapters/evmchain` implements custody's `ChainClient` for an
+EVM node. The watcher logic is unchanged: it was written against the port, and
+the same code runs on the fake chain and on anvil.
+
+What it does:
+
+- **Native ETH**: transactions in a block whose `to` is a watched address and
+  whose value is non-zero, counted only if the receipt status is success.
+  Native transfers have no log, so they use `LogIndex = 0xFFFFFFFF`; the
+  idempotency key `chain:<txhash>:<logindex>` cannot collide with a token log
+  in the same transaction. ETH sent by contracts (internal transfers) is not
+  seen.
+- **ERC-20**: `Transfer(address,address,uint256)` logs (topic0
+  `0xddf252ad…b3ef`) from configured token contracts, filtered by the
+  indexed `to` topic, queried by block hash.
+- **Reorgs**: headers are read with `eth_getBlockByNumber` and the node's own
+  `hash` and `parentHash` are used, not hashes recomputed locally.
+  Confirmation depth is the watcher's `Confirmations`.
+
+**Amounts.** The ledger is int64. The adapter converts base units (wei, token
+base units) into ledger units of `10^UnitExp` base units per asset (the demo
+uses 9, so 1 ETH = 10^9 gwei-units and int64 holds about 9.2 billion ETH). If an
+amount has a remainder below one unit, or does not fit int64, the adapter
+returns `ErrAmountPrecision` / `ErrAmountOverflow`. The watcher stops on that
+block and keeps returning the error; nothing is truncated, wrapped or credited.
+A production system would keep big integers end to end.
+
+**Why go-ethereum.** It built cleanly here (v1.17.10, no cgo). It brings
+`ethclient`, typed receipts and log filters, and `crypto.Keccak256`, which is
+less hand-written parsing than a raw JSON-RPC client. The cost is 26 indirect
+modules and a larger go.sum. The arch test keeps it inside this one adapter,
+so swapping it for a small stdlib client later touches one package.
+
+**How it was verified.** `make evm-test` (build tag `evm`) starts a fresh
+anvil on a free port for each test and drives it with `cast` and JSON-RPC
+using anvil's public dev account. The tests cover:
+
+- native and ERC-20 deposits credited only after N confirmations;
+- a real reorg with `anvil_reorg` and a rollback with `evm_snapshot` /
+  `evm_revert`, each dropping a pending deposit with nothing credited;
+- a reorg below the threshold raising `ReorgAlert` while the ledger stays
+  consistent;
+- restart from a file cursor and duplicate delivery after a stale cursor
+  (the ledger keeps one transaction);
+- overflow and precision errors.
+
+The token is a minimal contract whose source (`testdata/TestToken.sol`) and
+forge-compiled bytecode are committed. `make evm-demo` runs the same flow and
+prints balances, trace-linked logs and chain metrics. Install Foundry from
+https://www.getfoundry.sh/ (or set `FOUNDRY_BIN`); without it the tagged tests
+skip, and `make check` never needs it.
+
+**Limits.**
+
+- Verified only on a local anvil devnet; not for mainnet or any public
+  network.
+- Read-only: no signer, no keys, no withdrawals, no hot wallet.
+- Confirmations are a heuristic against reorgs, not finality. Finality tags
+  (`safe`/`finalized`) are not supported.
+- One node, no failover. Polling only, no subscriptions.
 
 ## Market data
 
@@ -468,9 +538,8 @@ this lab but would be contended under heavy parallel load.
 
 - No trading API, authentication, rate limits or admin tools; the only
   network surface is the read-only market data WebSocket and `/metrics`.
-- No real blockchain. `anvil`/`geth` were not available where this was built,
-  so there is no real EVM adapter; the watcher runs only against the fake
-  chain.
+- The EVM adapter has been run only against a local anvil devnet; it supports
+  native ETH and ERC-20 deposits, no finality tags, no failover.
 - No signing, key management or withdrawal broadcasting. Withdraw confirm/fail
   are plain ledger commands.
 - In-memory plus local files only; no database, replication or failover.
@@ -486,8 +555,9 @@ this lab but would be contended under heavy parallel load.
    transaction as the entries.
 2. Engine snapshots plus log truncation; settle asynchronously from the
    trade stream.
-3. A real EVM adapter (go-ethereum `ethclient`, ERC-20 `Transfer` logs)
-   behind a build tag, tested against a local anvil node.
+3. EVM: finality tags (`finalized`) alongside confirmations, several nodes
+   with cross-checks, log subscriptions, internal ETH transfers via traces,
+   big-integer amounts end to end.
 4. Signer isolation for withdrawals: a separate service with its own keys
    and limits, never in the exchange process.
 5. Self-trade prevention, order types (IOC, FOK, post-only), per-user limits.
