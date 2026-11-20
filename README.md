@@ -623,3 +623,7 @@ this lab but would be contended under heavy parallel load.
 7. Market data: resumable streams (replay from a seq instead of a full
    snapshot), per-IP limits, compression, private channels behind auth.
 8. External review of the ledger and settlement logic.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
