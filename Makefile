@@ -1,4 +1,4 @@
-.PHONY: check vet test arch evm-test fuzz bench demo demo-serve
+.PHONY: check vet test arch evm-test evm-demo fuzz bench demo demo-serve
 
 check: vet test
 
@@ -16,6 +16,9 @@ arch:
 # Needs Foundry (anvil, cast): https://www.getfoundry.sh/ . Not part of check.
 evm-test:
 	go test -tags evm -race -count=1 -v ./internal/custody/adapters/evmchain/
+
+evm-demo:
+	go run ./cmd/evmdemo
 
 fuzz:
 	go test -run '^$$' -fuzz FuzzExchange -fuzztime 30s ./internal/trading/

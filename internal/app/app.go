@@ -15,6 +15,7 @@ import (
 
 	"github.com/gwakko/cex-lab/internal/app/instrument"
 	"github.com/gwakko/cex-lab/internal/custody"
+	"github.com/gwakko/cex-lab/internal/custody/adapters/evmchain"
 	"github.com/gwakko/cex-lab/internal/events"
 	"github.com/gwakko/cex-lab/internal/ledger"
 	"github.com/gwakko/cex-lab/internal/ledger/adapters/filestore"
@@ -166,6 +167,22 @@ func (a *App) NewDepositWatcher(client custody.ChainClient, cursor custody.Curso
 	cfg.Metrics = instrument.NewChain(a.Registry)
 	cfg.Logger = a.logger
 	return custody.NewWatcher(client, cursor, NewDepositCreditor(a.Ledger, owners), cfg)
+}
+
+// NewEVMDepositWatcher connects to an EVM node with the evmchain adapter and
+// builds a watcher that credits the ledger. Call the returned close function
+// when done.
+func (a *App) NewEVMDepositWatcher(ctx context.Context, node evmchain.Config, cursor custody.CursorStore, owners map[string]string, cfg custody.Config) (*custody.Watcher, func(), error) {
+	client, err := evmchain.Dial(ctx, node)
+	if err != nil {
+		return nil, nil, err
+	}
+	w, err := a.NewDepositWatcher(client, cursor, owners, cfg)
+	if err != nil {
+		client.Close()
+		return nil, nil, err
+	}
+	return w, client.Close, nil
 }
 
 // NewRelay drains the ledger outbox into deliver from offset. opts are
