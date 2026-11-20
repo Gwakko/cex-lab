@@ -130,7 +130,7 @@ func rule(from class, imp string) string {
 		}
 	case kindModuleDomain:
 		if slices.Contains(forbiddenInDomain, imp) {
-			return fmt.Sprintf("module %s domain code must not do I/O; move it to an adapter", from.module)
+			return fmt.Sprintf("module %s domain code must not do I/O or read the environment; move it to an adapter or internal/app", from.module)
 		}
 		return moduleRule(from, to, imp, false)
 	case kindModuleAdapter:

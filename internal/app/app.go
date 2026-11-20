@@ -38,6 +38,12 @@ type Config struct {
 	Markets []trading.MarketConfig
 	// Logger receives every module's logs; nil discards them.
 	Logger *slog.Logger
+	// DisableMetrics removes /metrics from Handler (metrics are still recorded).
+	DisableMetrics bool
+	// Market data WebSocket limits; zero means the module default.
+	WSMaxConnections int
+	WSQueueSize      int
+	WSAllowedOrigins []string
 }
 
 // App is the wired system.
@@ -48,6 +54,7 @@ type App struct {
 	Registry   *telemetry.Registry
 	Health     *telemetry.Health
 
+	cfg     Config
 	logger  *slog.Logger
 	outbox  *instrument.Outbox
 	closers []func() error
@@ -55,7 +62,7 @@ type App struct {
 
 // New builds and starts every module.
 func New(cfg Config) (_ *App, err error) {
-	a := &App{Registry: telemetry.NewRegistry(), Health: &telemetry.Health{}, logger: cfg.Logger}
+	a := &App{Registry: telemetry.NewRegistry(), Health: &telemetry.Health{}, cfg: cfg, logger: cfg.Logger}
 	if a.logger == nil {
 		a.logger = slog.New(slog.DiscardHandler)
 	}
@@ -89,7 +96,7 @@ func New(cfg Config) (_ *App, err error) {
 	for i, m := range markets {
 		symbols[i] = m.Symbol
 	}
-	a.MarketData = marketdata.New(marketdata.Config{Markets: symbols},
+	a.MarketData = marketdata.New(marketdata.Config{Markets: symbols, MaxConnections: cfg.WSMaxConnections, QueueSize: cfg.WSQueueSize},
 		marketdata.WithMetrics(instrument.NewMarketData(a.Registry)), marketdata.WithLogger(a.logger))
 
 	a.Trading, err = trading.New(NewLedgerPort(a.Ledger), markets,
@@ -197,11 +204,16 @@ func (a *App) NewInbox(h outbox.Handler, opts ...outbox.Option) *outbox.Inbox {
 	return outbox.NewInbox(h, append([]outbox.Option{outbox.WithMetrics(a.outbox)}, opts...)...)
 }
 
-// Handler serves /metrics, /healthz, /readyz and the market data WebSocket
-// at /ws.
+// Handler serves /metrics (unless disabled), /healthz, /readyz and the market
+// data WebSocket at /ws.
 func (a *App) Handler() http.Handler {
-	mux := telemetry.NewMux(a.Registry, a.Health)
-	mux.Handle("GET /ws", ws.NewHandler(a.MarketData, ws.Config{Logger: a.logger}))
+	mux := http.NewServeMux()
+	if !a.cfg.DisableMetrics {
+		mux.Handle("GET /metrics", a.Registry.Handler())
+	}
+	mux.Handle("GET /healthz", a.Health.Liveness())
+	mux.Handle("GET /readyz", a.Health.Readiness())
+	mux.Handle("GET /ws", ws.NewHandler(a.MarketData, ws.Config{Logger: a.logger, OriginPatterns: a.cfg.WSAllowedOrigins}))
 	return mux
 }
 

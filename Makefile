@@ -30,4 +30,4 @@ demo:
 	go run ./cmd/demo
 
 demo-serve:
-	go run ./cmd/demo -addr 127.0.0.1:9090 -wait 60s
+	CEXLAB_HTTP_ADDR=127.0.0.1:9090 go run ./cmd/demo -wait 60s

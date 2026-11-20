@@ -9,7 +9,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -31,6 +30,7 @@ import (
 	"github.com/gwakko/cex-lab/internal/ledger"
 	"github.com/gwakko/cex-lab/internal/marketdata"
 	"github.com/gwakko/cex-lab/internal/marketdata/adapters/ws"
+	"github.com/gwakko/cex-lab/internal/platform/config"
 	"github.com/gwakko/cex-lab/internal/platform/outbox"
 	"github.com/gwakko/cex-lab/internal/platform/trace"
 	"github.com/gwakko/cex-lab/internal/trading"
@@ -43,35 +43,39 @@ const (
 )
 
 func main() {
-	addr := flag.String("addr", "127.0.0.1:0", "listen address for /metrics, /healthz, /readyz")
 	wait := flag.Duration("wait", 0, "keep serving this long after the scenario (e.g. 60s to curl /metrics)")
 	flag.Parse()
 
-	dir, err := os.MkdirTemp("", "cex-lab-demo-")
-	must(err)
-	defer os.RemoveAll(dir)
+	settings, src := loadSettings()
+	for _, k := range src.Keys(app.Prefix) {
+		fmt.Printf("config: %s from %s\n", k, src.Origin(k)) // key and source only, never the value
+	}
+	if !slices.ContainsFunc(settings.Markets, func(m trading.MarketConfig) bool {
+		return m.Symbol == "BTC-USDT" && m.Base == btc && m.Quote == usdt && m.Lot == lot
+	}) {
+		log.Fatalf("the demo scenario needs market %s in %s", app.DefaultMarkets, app.KeyMarkets)
+	}
+	if settings.DataDir == "" {
+		dir, err := os.MkdirTemp("", "cex-lab-demo-")
+		must(err)
+		defer os.RemoveAll(dir)
+		settings.DataDir = dir
+	}
 
 	var logs bytes.Buffer
-	a, err := app.New(app.Config{
-		DataDir: dir,
-		Logger:  slog.New(slog.NewJSONHandler(&logs, nil)),
-		Markets: []trading.MarketConfig{{
-			Symbol: "BTC-USDT", Base: btc, Quote: usdt,
-			Tick: 1, Lot: lot, MakerFeeBps: 10, TakerFeeBps: 20,
-		}},
-	})
+	a, err := app.New(settings.AppConfig(settings.Logger(&logs)))
 	must(err)
 	defer a.Close()
 	l, x := a.Ledger, a.Trading
 
-	base := serve(*addr, a.Handler())
+	base := serve(settings.HTTPAddr, a.Handler())
 	fmt.Printf("serving %s/metrics, /healthz, /readyz, /ws\n", base)
 	feed := subscribe(base, "BTC-USDT")
 	defer feed.client.Close()
 
 	ctx := context.Background()
 	fmt.Println("\n== deposits")
-	chainDeposit(ctx, a)
+	chainDeposit(ctx, a, settings.Confirmations)
 	must2(l.Apply(ledger.Deposit{Key: "bank-1", User: "bob", Asset: usdt, Amount: 100_000_00}))
 	must2(l.Apply(ledger.Deposit{Key: "bank-1", User: "bob", Asset: usdt, Amount: 100_000_00})) // client retry
 	printBalances(l)
@@ -255,24 +259,39 @@ func printExcerpt(page string, prefixes []string) {
 	}
 }
 
+// printTrace prints log lines carrying traceID, in either log format.
 func printTrace(logs *bytes.Buffer, traceID string) {
 	sc := bufio.NewScanner(bytes.NewReader(logs.Bytes()))
 	for sc.Scan() {
-		var m map[string]any
-		if json.Unmarshal(sc.Bytes(), &m) == nil && m["trace_id"] == traceID {
-			fmt.Println("  " + sc.Text())
+		if line := sc.Text(); strings.Contains(line, `"trace_id":"`+traceID+`"`) || strings.Contains(line, "trace_id="+traceID) {
+			fmt.Println("  " + line)
 		}
 	}
 }
 
+// loadSettings reads .env, .env.local and the environment (highest wins) and
+// exits with every invalid key listed if the configuration is wrong.
+func loadSettings() (app.Settings, *config.Source) {
+	src, err := config.Load(".", os.Environ())
+	if err != nil {
+		log.Fatal(err)
+	}
+	s, err := app.LoadSettings(src.Lookup)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	return s, src
+}
+
 // chainDeposit credits alice's BTC through the custody watcher on a fake chain.
-func chainDeposit(ctx context.Context, a *app.App) {
+func chainDeposit(ctx context.Context, a *app.App, confirmations uint64) {
 	fc := fakechain.New()
 	w, err := a.NewDepositWatcher(fc, &memcursor.Store{}, map[string]string{"addr-alice": "alice"},
-		custody.Config{Confirmations: 3, Watched: []string{"addr-alice"}, StartBlock: 1})
+		custody.Config{Confirmations: confirmations, Watched: []string{"addr-alice"}, StartBlock: 1})
 	must(err)
 	fc.Mine(custody.Transfer{TxHash: "0xfeed", To: "addr-alice", Asset: btc, Amount: 100 * lot})
-	for i := range 3 {
+	for i := range confirmations {
 		must(w.Poll(ctx))
 		fmt.Printf("block %d: pending=%d credited=%d\n", i+1, len(w.Pending()), len(w.Credited()))
 		fc.Mine()

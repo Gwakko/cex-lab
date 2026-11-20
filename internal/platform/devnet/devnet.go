@@ -102,6 +102,20 @@ func Start(ctx context.Context) (*Anvil, error) {
 	return a, nil
 }
 
+// Attach uses an already running local dev node (for example a long-lived
+// anvil). Stop does nothing for an attached node.
+func Attach(ctx context.Context, url string) (*Anvil, error) {
+	castBin, err := FoundryBin("cast")
+	if err != nil {
+		return nil, err
+	}
+	a := &Anvil{URL: url, cast: castBin}
+	if err := a.Call(ctx, &a.Version, "web3_clientVersion"); err != nil {
+		return nil, fmt.Errorf("devnet: attach: %w", err)
+	}
+	return a, nil
+}
+
 func freePort() (int, error) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -130,8 +144,11 @@ func (a *Anvil) waitReady(ctx context.Context) error {
 	}
 }
 
-// Stop kills the node and waits for it to exit.
+// Stop kills a node started by Start and waits for it to exit.
 func (a *Anvil) Stop() {
+	if a.cmd == nil {
+		return
+	}
 	a.cmd.Process.Kill()
 	<-a.exited
 }
