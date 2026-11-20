@@ -29,7 +29,8 @@ var forbiddenInDomain = []string{"os", "os/exec", "net", "net/http"}
 // restrictedLibs are third-party libraries only one package may import, so a
 // dependency stays an adapter detail.
 var restrictedLibs = map[string]string{
-	"github.com/coder/websocket": module + "/internal/marketdata/adapters/ws",
+	"github.com/coder/websocket":      module + "/internal/marketdata/adapters/ws",
+	"github.com/ethereum/go-ethereum": module + "/internal/custody/adapters/evmchain",
 }
 
 // apiFiles may declare exported top-level identifiers in a module root.
@@ -299,6 +300,8 @@ func TestRulesCatchViolations(t *testing.T) {
 		{"marketdata domain uses net/http", p("internal/marketdata/internal/hub", "net/http"), "must not do I/O"},
 		{"hub imports websocket", p("internal/marketdata/internal/hub", "github.com/coder/websocket"), "only internal/marketdata/adapters/ws may import"},
 		{"demo imports websocket", p("cmd/demo", "github.com/coder/websocket/wsjson"), "only internal/marketdata/adapters/ws may import"},
+		{"watcher imports go-ethereum", p("internal/custody/internal/watch", "github.com/ethereum/go-ethereum/common"), "only internal/custody/adapters/evmchain may import"},
+		{"app imports go-ethereum", p("internal/app", "github.com/ethereum/go-ethereum/ethclient"), "only internal/custody/adapters/evmchain may import"},
 	}
 	for _, tc := range cases {
 		vs := importViolations([]pkg{tc.pkg})
@@ -314,6 +317,7 @@ func TestRulesCatchViolations(t *testing.T) {
 		p("internal/platform/outbox", "internal/events", "log/slog"),
 		p("cmd/demo", "internal/app", "internal/ledger"),
 		p("internal/marketdata/adapters/ws", "github.com/coder/websocket", "internal/marketdata", "net/http"),
+		p("internal/custody/adapters/evmchain", "github.com/ethereum/go-ethereum/ethclient", "internal/custody"),
 	}
 	if vs := importViolations(allowed); len(vs) != 0 {
 		t.Errorf("allowed imports reported: %q", vs)
