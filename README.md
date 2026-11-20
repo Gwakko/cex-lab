@@ -40,6 +40,7 @@ event contracts, platform infrastructure, and one composition root.
 | `internal/custody` | Custody module. Deposit watcher with confirmations, reorg handling, idempotent crediting through `DepositCreditor`, and a persisted cursor. Adapters: `adapters/evmchain` (EVM node via go-ethereum: native ETH and ERC-20 deposits), `adapters/fakechain` (deterministic chain with reorgs), `adapters/filecursor`, `adapters/memcursor`. |
 | `internal/marketdata` | Market data module. Public `trades:<market>` and `book:<market>` channels: a top-N book snapshot, then incremental updates with a per-market sequence number; bounded per-client queues; a client-side `BookReplica` with gap detection. Built only from `internal/events`. Adapter: `adapters/ws` (WebSocket server and client, the only user of the WebSocket library). |
 | `internal/events` | Versioned event contracts (`events.Event`) shared by producers and consumers. |
+| `internal/platform/config` | Stdlib dotenv loader: `.env`, `.env.local` and the process environment with explicit precedence; never modifies the environment. |
 | `internal/platform/devnet` | Starts a throwaway local anvil and drives it with cast and JSON-RPC, for `evm` tests and `cmd/evmdemo`. |
 | `internal/platform/journal` | Append-only fsynced JSON-lines file used by the file adapters. |
 | `internal/platform/outbox` | Relay that drains events at least once, and a consumer inbox that deduplicates by event id. |
@@ -364,6 +365,62 @@ skip, and `make check` never needs it.
 - Confirmations are a heuristic against reorgs, not finality. Finality tags
   (`safe`/`finalized`) are not supported.
 - One node, no failover. Polling only, no subscriptions.
+
+## Configuration
+
+Everything is configured with `CEXLAB_*` keys. They are read in
+`internal/app` (`LoadSettings`); domain modules never read the environment,
+and the arch test enforces that.
+
+**Precedence, highest first:** the real process environment, then
+`.env.local`, then `.env`, then the defaults below. Missing files are fine.
+The demos print which keys were set and where they came from (for example
+`config: CEXLAB_CONFIRMATIONS from .env.local`), never the values.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `CEXLAB_HTTP_ADDR` | `127.0.0.1:0` | Listen address for `/metrics`, `/healthz`, `/readyz`, `/ws` |
+| `CEXLAB_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
+| `CEXLAB_LOG_FORMAT` | `json` | `json` or `text` |
+| `CEXLAB_DATA_DIR` | empty | Ledger journal and command logs; empty means a temporary directory in the demo, memory elsewhere |
+| `CEXLAB_MARKETS` | `BTC-USDT:BTC:USDT:1:100000:10:20` | `SYMBOL:BASE:QUOTE:TICK:LOT:MAKER_BPS:TAKER_BPS`, comma separated |
+| `CEXLAB_CONFIRMATIONS` | `3` | Blocks before a deposit is credited (1..1000) |
+| `CEXLAB_EVM_RPC_URL` | empty | EVM node; `cmd/evmdemo` starts its own anvil when empty and only accepts loopback URLs |
+| `CEXLAB_WATCHED_ADDRESSES` | empty | `0xADDRESS=user`, comma separated (used by `cmd/evmdemo`) |
+| `CEXLAB_METRICS_ENABLED` | `true` | Serve `/metrics` |
+| `CEXLAB_WS_MAX_CONNECTIONS` | `1000` | Market data connection limit |
+| `CEXLAB_WS_QUEUE_SIZE` | `256` | Per-client send queue before a slow consumer is dropped |
+| `CEXLAB_WS_ALLOWED_ORIGINS` | empty | Cross-origin hosts allowed on `/ws`; empty means same origin only |
+
+**File syntax** (`internal/platform/config`): `KEY=value`, blank lines,
+`# comments`, an optional `export ` prefix, `'single'` (literal) or
+`"double"` (with `\n \t \" \\` escapes) quoted values, and inline `#`
+comments after unquoted values. Anything else fails with `file:line`.
+
+**Validation** runs at startup and lists every invalid key at once, for
+example:
+
+```
+invalid configuration:
+  CEXLAB_LOG_FORMAT: want one of json, text, got "xml"
+  CEXLAB_MARKETS: want SYMBOL:BASE:QUOTE:TICK:LOT:MAKER_BPS:TAKER_BPS, got "bad"
+  CEXLAB_CONFIRMATIONS: want an integer in [1, 1000], got "0"
+```
+
+(real output, exit code 2). Errors about `CEXLAB_EVM_RPC_URL` never repeat
+the value, because hosted RPC URLs usually contain API keys.
+
+**What to commit.** `.env.example` is the committed template: every key,
+safe defaults, comments, no secrets, and a test checks it parses and
+validates. `.env`, `.env.local` and `.env*.local` are git-ignored. `.env`
+is ignored too because in practice it ends up holding machine-specific
+values. Put personal or secret values (a hosted RPC URL, a data directory
+on your machine) in `.env.local` or in the real environment:
+
+```sh
+cp .env.example .env.local   # then edit; never commit it
+CEXLAB_CONFIRMATIONS=2 make demo   # the environment beats both files
+```
 
 ## Market data
 
